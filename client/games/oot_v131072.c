@@ -663,6 +663,8 @@ typedef struct { uint16_t id; uint64_t watch; uint64_t actor; int outfit, child;
                  uint64_t navi_watch, navi; int navi_anim; uint8_t navi_arg[0xa0] __attribute__((aligned(16)));   // navi_tick: its own fairy
                  int weapon_on;   // its bow / slingshot made (puppet_weapon)
                  double down_t;   // when its player went down (it falls and lies there DOWN_HOLD s, then goes)
+                 float down_p[3]; uint16_t down_yaw;   // where it fell (it stays there)
+                 float lift; double lift_t; float lift_test;   // knocked flat: how far it is lifted now (puppet_lift), when last changed
                  float aim_turn; double aim_t;   // its turn while it aims (AIM_TURN: its bow arm along its player's aim), and when last turned
                  uint8_t arg[0xa0] __attribute__((aligned(16)));
                  uint8_t bb[0x1918] __attribute__((aligned(16))); } Puppet;
@@ -962,10 +964,34 @@ static void puppet_weapon(Puppet *p) {
     p->weapon_on = 1; MP_GAME_LOG("stand-in for %s: %s out (slot %d, state %d): %s", p->name, w, slot, state, asked ? "asked" : "refused");
 }
 #define AIM_TURN 8192.0f   // 45 degrees (u16 yaw)
-// A player who goes down falls where they stood (Link's DamageL: knocked flat; DM_MP_DOWN_CMD tries another) and lies there DOWN_HOLD
-// seconds before the stand-in goes; it went the moment the server said so before, gone in a blink mid-fight (runs/vid23)
-#define DOWN_HOLD 2.2
-static const char *down_cmd(void) { static env_switch e = { .name = "DM_MP_DOWN_CMD" }; const char *v = env_now(&e); return v[0] ? v : "DamageL"; }
+// A player who goes down falls where they stood (Link's DamageL: knocked flat; DM_MP_DOWN_CMD tries another) and lies there, its Navi
+// over it, until the server brings them back (at most DOWN_HOLD s); it went the moment the server said so before, gone in a blink
+// mid-fight (runs/vid23), and a 2.2 s hold still blinked out before the respawn
+#define DOWN_HOLD 6.0
+#define DOWN_LIFT 0.18f   // m, adult (runs/downt2: 0.15 rests on the planks, 0.35 floats); young Link, about 0.7 the size: 0.7 of it
+// Link's knock-down (DamageL) ends with him lying lower than where he stood: his own code sets him on the ground, and a stand-in, held at
+// its standing height, lay half inside the planks (runs/vid24). While it is knocked flat (its player's DamageL, or down) it is lifted
+// DOWN_LIFT, eased in over DOWN_LIFT_T s while it flies back, so it lands on the floor; out again as it gets up. (Dead / LandDead lie
+// flat but in the air: runs/downt1.) DM_MP_DOWN_LIFT=a,b,c (tests: one per player in the order they are knocked down)
+#define DOWN_LIFT_T 0.1   // (0.25 s was slower than the fall: it dipped into the planks for a few frames, runs/vid26)
+static float down_lift_at(int k) {
+    static env_switch e = { .name = "DM_MP_DOWN_LIFT" }; const char *v = env_now(&e); if (!v[0]) return -1;   // (-1: the default, by age)
+    const char *q = v; for (int i = 0; i < k && strchr(q, ','); i++) q = strchr(q, ',') + 1; return (float)atof(q);
+}
+static void puppet_lift(Puppet *p, int flat) {
+    static int knocks; double gt = game_now(), dt = p->lift_t > 0 ? gt - p->lift_t : 0; p->lift_t = gt; if (dt > 0.1) dt = 0.1;
+    if (flat && p->lift == 0 && p->lift_test == 0) { float v = down_lift_at(knocks++); p->lift_test = v; }   // (tests)
+    float full = p->lift_test > 0 ? p->lift_test : p->child ? DOWN_LIFT * 0.7f : DOWN_LIFT, want = flat ? full : 0;
+    float step = (float)(full * dt / DOWN_LIFT_T);
+    p->lift += want > p->lift ? fminf(step, want - p->lift) : -fminf(step, p->lift - want);
+    if (!flat && p->lift == 0) p->lift_test = 0;
+}
+// (tests: DM_MP_DOWN_CMD=a,b,c: one per player in the order they go down, the last repeated)
+static const char *down_cmd_at(int k) {
+    static env_switch e = { .name = "DM_MP_DOWN_CMD" }; const char *v = env_now(&e); if (!v[0]) return "DamageL";
+    static char out[48]; const char *q = v; for (int i = 0; i < k && strchr(q, ','); i++) q = strchr(q, ',') + 1;
+    size_t n = strcspn(q, ","); if (n >= sizeof out) n = sizeof out - 1; memcpy(out, q, n); out[n] = 0; return out;
+}
 static void puppets_update(uint64_t me, const mp_remote *o, int n, uint32_t scene) {
     if (scene != g_pup_scene) {   // a new area: the game deleted the stand-ins; requests still pending are cancelled (they would leak the engine's watchers)
         for (int i = 0; i < MAX_PUPPETS; i++) { watch_cancel(&g_pup[i].watch); watch_cancel(&g_pup[i].navi_watch); }
@@ -991,8 +1017,18 @@ static void puppets_update(uint64_t me, const mp_remote *o, int n, uint32_t scen
         Puppet *p = NULL;
         for (int i = 0; i < MAX_PUPPETS; i++) if (g_pup[i].id == o[j].id) p = &g_pup[i];
         if (o[j].flags & MP_PF_DEAD) {   // down: no stand-in made for it; the one there falls where it stood and lies still (then goes, above)
-            if (p && p->actor && r32(p->actor + A_STATE) == 4 && p->anim != 14 && as_play_rate(p->actor, down_cmd(), 1.0f)) {
-                p->anim = 14; navi_drop(p); MP_GAME_LOG("stand-in for %s: down (%s)", p->name, down_cmd()); }
+            static int downs; const char *dc = down_cmd_at(downs);
+            if (p && p->actor && r32(p->actor + A_STATE) == 4 && p->anim != 14 && (p->anim == 13 || as_play_rate(p->actor, dc, 1.0f))) {
+                MP_GAME_LOG("stand-in for %s: down (%s)", p->name, p->anim == 13 ? "already knocked flat" : dc);   // (no second fall)
+                p->anim = 14; downs++;
+                p->down_p[0] = o[j].x; p->down_p[1] = o[j].y; p->down_p[2] = o[j].z; p->down_yaw = (uint16_t)(o[j].yaw - (int)p->aim_turn);
+            }
+            if (p && p->actor && p->anim == 14 && r32(p->actor + A_STATE) == 4) {   // where it fell, on the floor (puppet_lift)
+                puppet_lift(p, 1);
+                float m[12]; yaw_matrix(m, p->down_p[0], p->down_p[1] + p->lift, p->down_p[2], p->down_yaw);
+                ((f_force_set_matrix)fn(F_FORCE_SET_MATRIX))((void *)p->actor, m, false);
+                navi_tick(p, &o[j]);   // (its Navi stays over it)
+            }
             continue;
         }
         if (!p) { for (int i = 0; i < MAX_PUPPETS; i++) if (!g_pup[i].id) { p = &g_pup[i]; break; } if (p) puppet_request(p, &o[j], (o[j].equip & MP_EQ_CHILD) != 0); continue; }
@@ -1014,7 +1050,8 @@ static void puppets_update(uint64_t me, const mp_remote *o, int n, uint32_t scen
             float want = (p->anim == 6 || p->anim == 7) ? AIM_TURN : 0, step = (float)(AIM_TURN * dt / 0.12);
             p->aim_turn += want > p->aim_turn ? fminf(step, want - p->aim_turn) : -fminf(step, p->aim_turn - want);
         }
-        float m[12]; yaw_matrix(m, o[j].x, o[j].y, o[j].z, (uint16_t)(o[j].yaw - (int)p->aim_turn));
+        puppet_lift(p, p->anim == 13);   // (its player knocked flat: DamageL)
+        float m[12]; yaw_matrix(m, o[j].x, o[j].y + p->lift, o[j].z, (uint16_t)(o[j].yaw - (int)p->aim_turn));
         ((f_force_set_matrix)fn(F_FORCE_SET_MATRIX))((void *)p->actor, m, false);
         { static int probe = -1; static double last; if (probe < 0) probe = getenv("DM_MP_BBPROBE") ? atoi(getenv("DM_MP_BBPROBE")) : 0;
           if (probe && p == &g_pup[0] && t - last > 1.0) { last = t; bb_dump("Link", me); for (int q = 0; q < MAX_PUPPETS; q++) if (g_pup[q].actor && (probe > 1 || q == 0)) bb_dump(g_pup[q].name, g_pup[q].actor); } }   // (before our writes; DM_MP_BBPROBE=2: every stand-in)
