@@ -137,6 +137,7 @@ class Ground:
 
 
 ZR = 0x200   # player 1's buttons (NpadButton bit 9)
+B = 0x2       # (bit 1: puts an aimed item away)
 
 
 def scene_shootout():
@@ -160,26 +161,28 @@ def scene_shootout():
 
 
 def scene_duel():
-    # Shooting at each other, close and readable: Kaze (left) and Rinku (right) trade arrows across the bridge in profile, in front of
-    # the chain posts (runs/vid22: farther out, the right post hid Rinku and all four were small); Hylia (far, facing us, inside the
-    # posts) and Mido (left, farther) shoot at our Link, who fires back twice at Hylia (straight ahead): she flinches, then goes down
-    # (the info bar says so) and comes back at the far end. Every shot is the aim (BowCharge), the release (BowShoot) and the arrow's
-    # flight; a hit is the target's flinch (DamageS / DamageL) or our hearts. events: (t, kind, ...); input: (t, buttons)
-    K = Player(951, 'Kaze', 2, False, 2.2, 35.3, 0)
-    R = Player(952, 'Rinku', 1, False, -2.2, 36.7, 0)
-    H = Player(953, 'Hylia', 0, False, 0.5, 42.0, 180)
-    M = Player(954, 'Mido', 0, True, 1.3, 40.8, 180)
-    kr = face_at((2.2, 35.3), (-2.2, 36.7)); rk = face_at((-2.2, 36.7), (2.2, 35.3))
-    K.wait(30, kr); R.plan.append(('wait', 6.6, rk)); M.wait(30, face_at((1.3, 40.8), CAMERA_LINK))
-    K.act(0.3, 1.5, 6).act(1.5, 1.85, 7).act(3.55, 4.1, 11).act(6.9, 7.8, 6).act(7.8, 8.15, 7)
-    R.act(1.65, 2.2, 11).act(2.35, 3.4, 6).act(3.4, 3.75, 7).act(7.95, 8.6, 13).down(8.6, 10.5)
-    R.run(-1.0, 38.6).wait(30, face_at((-1.0, 38.6), (2.2, 35.3)))    # (6.6 s: off toward the middle, turning to face Kaze again)
-    H.act(1.9, 3.0, 6).act(3.0, 3.35, 7).act(4.42, 4.95, 11).act(5.55, 6.3, 13).down(6.3, 8.4)
-    H.wait(8.3, 180).jump(-0.9, 44.4, 180).wait(8.6).walk(-0.3, 42.4).wait(30, 182)
-    M.act(4.9, 5.9, 6).act(5.9, 6.25, 7)
-    events = [(1.5, 'shot', K, R), (3.4, 'shot', R, K), (3.0, 'shot', H, None), (3.12, 'damage', 2, H), (5.9, 'shot', M, None),
-              (6.02, 'damage', 1, M), (6.4, 'notice', 'You shot Hylia'), (7.8, 'shot', K, R)]
-    pad = [(3.35, ZR), (4.28, 0), (4.6, ZR), (5.42, 0), (5.6, 0)]
+    # Shooting at each other, everyone close, lit and inside the chain posts (runs/vid22-23: the far ones were specks, the Goron tunic a
+    # silhouette in the posts' shadow): Kaze (left, Zora) and Rinku (right, Kokiri) trade arrows across the bridge in profile; Hylia
+    # (Goron, in the middle, facing us) and Mido (young) shoot at our Link (his hearts go; he doesn't flinch yet: his player code plays
+    # his hit reactions, not a command); ours fires back twice at Hylia, puts the
+    # slingshot away (B: the camera comes back from over his shoulder) and Hylia falls and lies there (the client's down: DOWN_HOLD),
+    # then comes back at the far end; Rinku runs, Kaze drops him too. Every shot is the draw (BowCharge), the release (BowShoot) and
+    # the arrow; a hit is the target's flinch (DamageS) or knock-down (DamageL). events: (t, kind, ...); input: (t, buttons)
+    K = Player(951, 'Kaze', 2, False, 2.1, 35.6, 0)
+    R = Player(952, 'Rinku', 0, False, -2.1, 36.6, 0)
+    H = Player(953, 'Hylia', 1, False, 0.45, 39.6, 180)
+    M = Player(954, 'Mido', 0, True, -0.9, 38.4, 180)
+    kr = face_at((2.1, 35.6), (-2.1, 36.6)); rk = face_at((-2.1, 36.6), (2.1, 35.6))
+    K.wait(30, kr); R.plan.append(('wait', 6.6, rk)); M.wait(30, face_at((-0.9, 38.4), CAMERA_LINK)); H.wait(9.0, 180)
+    K.act(0.3, 1.5, 6).act(1.5, 1.85, 7).act(3.3, 3.85, 11).act(7.0, 7.9, 6).act(7.9, 8.25, 7)
+    R.act(1.6, 2.15, 11).act(2.2, 3.2, 6).act(3.2, 3.55, 7).act(8.0, 8.6, 13).down(8.6, 30)
+    R.run(-2.3, 38.4).wait(30, face_at((-2.3, 38.4), (2.1, 35.6)))    # (6.6 s: a few steps back toward the posts, turning to face Kaze again)
+    H.act(2.0, 3.0, 6).act(3.0, 3.35, 7).act(4.42, 4.95, 11).act(5.55, 5.95, 13).down(5.95, 9.2)
+    H.jump(-0.6, 44.0, 180).wait(9.4).walk(-0.3, 42.2).wait(30, 182)
+    M.act(5.2, 6.2, 6).act(6.2, 6.55, 7)
+    events = [(1.5, 'shot', K, R), (3.2, 'shot', R, K), (3.0, 'shot', H, None), (3.17, 'damage', 2, H), (6.2, 'shot', M, None),
+              (6.33, 'damage', 1, M), (6.05, 'notice', 'You shot Hylia'), (7.9, 'shot', K, R)]
+    pad = [(3.45, ZR), (4.3, 0), (4.6, ZR), (5.42, 0), (5.75, B), (5.85, 0)]
     return [K, R, H, M], events, pad
 
 
@@ -282,7 +285,8 @@ def main():
         for ev in sorted(events, key=lambda e: e[0]):   # (the module plays them in file order)
             t, kind = ev[0], ev[1]; fr = int(round((t + PREROLL) * FPS))
             if kind == 'shot':
-                p = ev[2]; r = p.rows[fr]; src = (r[5], r[6] + (0.95 if p.child else 1.3), r[7])
+                p = ev[2]; r = p.rows[fr]; a = r[8] / 65536.0 * 2 * math.pi   # from the bow hand: ahead of the chest along its facing
+                src = (r[5] + math.sin(a) * 0.45, r[6] + (0.95 if p.child else 1.3), r[7] + math.cos(a) * 0.45)
                 to = me
                 if len(ev) > 3 and ev[3] is not None:   # at another stand-in: its chest
                     q = ev[3]; qr = q.rows[fr]; to = (qr[5], qr[6] + (0.8 if q.child else 1.15), qr[7])

@@ -662,6 +662,8 @@ typedef struct { uint16_t id; uint64_t watch; uint64_t actor; int outfit, child;
                  double check_t; int replays;   // puppet_check: when its sequence was last checked, how often a command had to be played again
                  uint64_t navi_watch, navi; int navi_anim; uint8_t navi_arg[0xa0] __attribute__((aligned(16)));   // navi_tick: its own fairy
                  int weapon_on;   // its bow / slingshot made (puppet_weapon)
+                 double down_t;   // when its player went down (it falls and lies there DOWN_HOLD s, then goes)
+                 float aim_turn; double aim_t;   // its turn while it aims (AIM_TURN: its bow arm along its player's aim), and when last turned
                  uint8_t arg[0xa0] __attribute__((aligned(16)));
                  uint8_t bb[0x1918] __attribute__((aligned(16))); } Puppet;
 static Puppet g_pup[MAX_PUPPETS];
@@ -959,6 +961,11 @@ static void puppet_weapon(Puppet *p) {
     bool asked = ((f_req_equip_ok)fn(F_REQ_EQUIP))((void *)eu, (uint32_t)slot, &w, state, true);
     p->weapon_on = 1; MP_GAME_LOG("stand-in for %s: %s out (slot %d, state %d): %s", p->name, w, slot, state, asked ? "asked" : "refused");
 }
+#define AIM_TURN 8192.0f   // 45 degrees (u16 yaw)
+// A player who goes down falls where they stood (Link's DamageL: knocked flat; DM_MP_DOWN_CMD tries another) and lies there DOWN_HOLD
+// seconds before the stand-in goes; it went the moment the server said so before, gone in a blink mid-fight (runs/vid23)
+#define DOWN_HOLD 2.2
+static const char *down_cmd(void) { static env_switch e = { .name = "DM_MP_DOWN_CMD" }; const char *v = env_now(&e); return v[0] ? v : "DamageL"; }
 static void puppets_update(uint64_t me, const mp_remote *o, int n, uint32_t scene) {
     if (scene != g_pup_scene) {   // a new area: the game deleted the stand-ins; requests still pending are cancelled (they would leak the engine's watchers)
         for (int i = 0; i < MAX_PUPPETS; i++) { watch_cancel(&g_pup[i].watch); watch_cancel(&g_pup[i].navi_watch); }
@@ -968,9 +975,11 @@ static void puppets_update(uint64_t me, const mp_remote *o, int n, uint32_t scen
     // remove the ones no longer near (or who changed clothes: dressed again)
     for (int i = 0; i < MAX_PUPPETS; i++) {
         Puppet *p = &g_pup[i]; if (!p->id) continue;
-        int keep = 0;   // same player, same age, same tunic (the tunic is the adult's only), not down
+        int keep = 0;   // same player, same age, same tunic (the tunic is the adult's only); down: only while it lies there (DOWN_HOLD)
         for (int j = 0; j < n; j++) { int c = (o[j].equip & MP_EQ_CHILD) != 0;
-            if (o[j].id == p->id && c == p->child && (c || o[j].outfit == p->outfit) && !(o[j].flags & MP_PF_DEAD)) keep = 1; }
+            if (o[j].id != p->id || c != p->child || (!c && o[j].outfit != p->outfit)) continue;
+            if (!(o[j].flags & MP_PF_DEAD)) { keep = 1; p->down_t = 0; }
+            else { if (!p->down_t) p->down_t = game_now(); keep = p->actor && game_now() - p->down_t < DOWN_HOLD; } }   // (game time: footage too)
         if (!keep) {
             if (p->actor && r32(p->actor + A_STATE) >= 3 && r32(p->actor + A_STATE) <= 6) ((f_request_delete)fn(F_REQUEST_DELETE))((void *)p->actor, 0);
             navi_drop(p);
@@ -979,9 +988,13 @@ static void puppets_update(uint64_t me, const mp_remote *o, int n, uint32_t scen
     }
     double t = now_s();
     for (int j = 0; j < n; j++) {
-        if (o[j].flags & MP_PF_DEAD) continue;
         Puppet *p = NULL;
         for (int i = 0; i < MAX_PUPPETS; i++) if (g_pup[i].id == o[j].id) p = &g_pup[i];
+        if (o[j].flags & MP_PF_DEAD) {   // down: no stand-in made for it; the one there falls where it stood and lies still (then goes, above)
+            if (p && p->actor && r32(p->actor + A_STATE) == 4 && p->anim != 14 && as_play_rate(p->actor, down_cmd(), 1.0f)) {
+                p->anim = 14; navi_drop(p); MP_GAME_LOG("stand-in for %s: down (%s)", p->name, down_cmd()); }
+            continue;
+        }
         if (!p) { for (int i = 0; i < MAX_PUPPETS; i++) if (!g_pup[i].id) { p = &g_pup[i]; break; } if (p) puppet_request(p, &o[j], (o[j].equip & MP_EQ_CHILD) != 0); continue; }
         if (!p->actor) {
             if (p->watch) {
@@ -995,7 +1008,13 @@ static void puppets_update(uint64_t me, const mp_remote *o, int n, uint32_t scen
         uint32_t ast = r32(p->actor + A_STATE);
         if (ast == 3) continue;                               // taken, starting (4 on the engine's next pass)
         if (ast != 4) { p->id = 0; p->actor = 0; continue; }   // gone (deleted by the game)
-        float m[12]; yaw_matrix(m, o[j].x, o[j].y, o[j].z, o[j].yaw);
+        {   // aiming, it turns AIM_TURN to its right, eased over a few frames: Link's draw holds the bow arm ~45 degrees left of where his
+            // body faces (runs/aimdir: four archers at 0, 90, 180, 270), and his own code turns him to the aim, which a stand-in doesn't run
+            double gt = game_now(), dt = p->aim_t > 0 ? gt - p->aim_t : 0; p->aim_t = gt; if (dt > 0.1) dt = 0.1;
+            float want = (p->anim == 6 || p->anim == 7) ? AIM_TURN : 0, step = (float)(AIM_TURN * dt / 0.12);
+            p->aim_turn += want > p->aim_turn ? fminf(step, want - p->aim_turn) : -fminf(step, p->aim_turn - want);
+        }
+        float m[12]; yaw_matrix(m, o[j].x, o[j].y, o[j].z, (uint16_t)(o[j].yaw - (int)p->aim_turn));
         ((f_force_set_matrix)fn(F_FORCE_SET_MATRIX))((void *)p->actor, m, false);
         { static int probe = -1; static double last; if (probe < 0) probe = getenv("DM_MP_BBPROBE") ? atoi(getenv("DM_MP_BBPROBE")) : 0;
           if (probe && p == &g_pup[0] && t - last > 1.0) { last = t; bb_dump("Link", me); for (int q = 0; q < MAX_PUPPETS; q++) if (g_pup[q].actor && (probe > 1 || q == 0)) bb_dump(g_pup[q].name, g_pup[q].actor); } }   // (before our writes; DM_MP_BBPROBE=2: every stand-in)
@@ -1462,12 +1481,12 @@ static void notices_tick(void) {
 typedef struct { uint64_t watch, actor; float p[3], d[3], maxd, speed; double t0; int live; uint32_t scene; uint8_t arg[0xa0] __attribute__((aligned(16))); } flight_t;
 static uint32_t g_fl_scene;   // the area the world tick last saw: an arrow made in another one is dropped, not deleted (the area took it)
 static flight_t g_fl[FLIGHTS];
-static void dir_matrix(float *m, const float *p, const float *d) {   // Matrix34f, row-major: the model's -z along d (its head: runs/kit2 drew it
-    float z[3] = { -d[0], -d[1], -d[2] }, up[3] = { 0, 1, 0 }, x[3], y[3];  // tail first with +z), +y as near up as d allows
-    x[0] = up[1] * z[2] - up[2] * z[1]; x[1] = up[2] * z[0] - up[0] * z[2]; x[2] = up[0] * z[1] - up[1] * z[0];
-    float l = sqrtf(x[0] * x[0] + x[1] * x[1] + x[2] * x[2]); if (l < 1e-4f) { x[0] = 1; x[1] = x[2] = 0; l = 1; }
-    x[0] /= l; x[1] /= l; x[2] /= l;
-    y[0] = z[1] * x[2] - z[2] * x[1]; y[1] = z[2] * x[0] - z[0] * x[2]; y[2] = z[0] * x[1] - z[1] * x[0];
+static void dir_matrix(float *m, const float *p, const float *d) {   // Matrix34f, row-major: the display arrow's +y along d. Its head is +y (it
+    // stands upright on the pouch screen): with -z along d every arrow flew upright, head to the sky (runs/vid23)
+    float y[3] = { d[0], d[1], d[2] }, x[3] = { d[2], 0, -d[0] }, z[3];   // x = up x d: level, across the flight
+    float l = sqrtf(x[0] * x[0] + x[2] * x[2]); if (l < 1e-4f) { x[0] = 1; x[2] = 0; l = 1; }   // (straight up or down: any level x)
+    x[0] /= l; x[2] /= l;
+    z[0] = x[1] * y[2] - x[2] * y[1]; z[1] = x[2] * y[0] - x[0] * y[2]; z[2] = x[0] * y[1] - x[1] * y[0];   // z = x * y (right-handed)
     float r[12] = { x[0], y[0], z[0], p[0], x[1], y[1], z[1], p[1], x[2], y[2], z[2], p[2] }; memcpy(m, r, sizeof r);
 }
 void mp_game_shot_fx(uint16_t s, float x, float y, float z, float dx, float dy, float dz, int k) {
@@ -1492,6 +1511,15 @@ void mp_game_shot_fx(uint16_t s, float x, float y, float z, float dx, float dy, 
     float me[3] = { 0, 0, 0 }; if (!rd(player_actor() + A_POS, me, sizeof me)) me[1] = -1e9f; me[1] += 1.0f;
     float rel[3] = { me[0] - x, me[1] - y, me[2] - z }, along = rel[0] * f->d[0] + rel[1] * f->d[1] + rel[2] * f->d[2];
     if (along > 0) { float cx = rel[0] - f->d[0] * along, cy = rel[1] - f->d[1] * along, cz = rel[2] - f->d[2] * along; if (cx * cx + cy * cy + cz * cz < 0.8f * 0.8f && along < f->maxd) f->maxd = along; }
+    for (int i = 0; i < MAX_PUPPETS; i++) {   // and the other players: it ends in the first one it reaches (runs/vid23: one flew on through its target)
+        const Puppet *q = &g_pup[i]; if (!q->id || q->id == s || !q->actor || r32(q->actor + A_STATE) != 4) continue;
+        float qp[3]; if (!rd(q->actor + A_POS, qp, sizeof qp)) continue;
+        qp[1] += q->child ? 0.7f : 1.0f;   // its chest
+        float qr[3] = { qp[0] - x, qp[1] - y, qp[2] - z }, qa = qr[0] * f->d[0] + qr[1] * f->d[1] + qr[2] * f->d[2];
+        if (qa < 0.3f || qa >= f->maxd) continue;
+        float cx = qr[0] - f->d[0] * qa, cy = qr[1] - f->d[1] * qa, cz = qr[2] - f->d[2] * qa;
+        if (cx * cx + cz * cz < 0.45f * 0.45f && fabsf(cy) < (q->child ? 0.8f : 1.0f)) f->maxd = qa - 0.15f;   // (its front, not its middle)
+    }
     static env_switch sp = { .name = "DM_MP_ARROW_SPEED" }; f->speed = atof(env_now(&sp)); if (!(f->speed > 0)) f->speed = 45.0f;   // (a slow one for a test's screenshot)
 }
 static void flights_tick(uint32_t scene) {   // world tick: each arrow in the air one step on, the spent ones deleted
