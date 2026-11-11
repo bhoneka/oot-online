@@ -1,0 +1,21 @@
+diff --git a/dm/gfx/nvn/hle_nvn.c b/dm/gfx/nvn/hle_nvn.c
+index 42d5ccef..2d947c37 100644
+--- a/dm/gfx/nvn/hle_nvn.c
++++ b/dm/gfx/nvn/hle_nvn.c
+@@ -2314,7 +2314,15 @@ static void fstep_tick(const win_t *o, int c) {
+     const double v = 1e9 / fstep_hz();
+     uint64_t st = g_fs_start ? g_fs_start : now_ns(), pw = g_fs_wait; g_fs_start = g_fs_wait = 0;
+     double shown = prev ? (st - prev) / v : 0, gpu = 0; prev = st;
+-    for (uint64_t f = g_frame; f-- > 0 && g_frame - f <= 8;) { double g = mtl_gpu_ms(f); if (g >= 0) { gpu = g * 1e6 / v; break; } }
++    // The GPU cost: the frame's command buffers' summed times, or its GPU span (first start to last end) where that is shorter. On an M5 Max under macOS 26.7
++    // the sum read 4 times the span in Ocarina of Time's Hyrule Field (33 ms against 8 at a locked 60 fps with the hold off: buffers that overlap, or that start
++    // and then wait on the GPU for another queue's event, each count their whole time), so every frame looked 2 vsyncs long and the hold stepped to 30 and
++    // 20 fps and stayed there. The span also counts the gaps between buffers, so the smaller of the two is the closer bound on the GPU's work
++    for (uint64_t f = g_frame; f-- > 0 && g_frame - f <= 8;) {
++        double g = mtl_gpu_ms(f); if (g < 0) continue;
++        uint64_t g0, g1; if (mtl_gpu_span(f, &g0, &g1) && g1 > g0 && (g1 - g0) / 1e6 < g) g = (g1 - g0) / 1e6;
++        gpu = g * 1e6 / v; break;
++    }
+     double cpu = shown - pw / v, cost = cpu > gpu ? cpu : gpu;
+     int kmin = fstep_hz() / c, kmax = fps_high() ? 2 : !fstep_hold() ? kmin : kmin >= 2 ? 2 : FSTEP_MAX, k0 = g_fs.k,   // at 120 fps a late frame must step down whatever fps_hold says: the game steps by the target
+          kmin0 = g_fs.kmin, probe0 = g_fs.probe;

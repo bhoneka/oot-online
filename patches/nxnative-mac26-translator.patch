@@ -1,0 +1,83 @@
+diff --git a/dm/gfx/tools/dmsh_build.py b/dm/gfx/tools/dmsh_build.py
+index 169d7892..fd3aca24 100644
+--- a/dm/gfx/tools/dmsh_build.py
++++ b/dm/gfx/tools/dmsh_build.py
+@@ -671,7 +671,7 @@ def geometry_finish(key, w, j, c1):
+     dmsh_geometry.output_layout(code, 0)   # validate before running the translator
+     jobs = [{**j, 'key': key + '_g' + str(t), 'geometry_topology': t} for t in range(5)]
+     jp = os.path.join(w, key + '_geometry.json'); atomic_json(jp, jobs)
+-    rx = subprocess.run([XLATE, jp, w], capture_output=True, text=True)
++    rx = subprocess.run([*dmsh_chain.xlate_cmd(XLATE), jp, w], capture_output=True, text=True)
+     if rx.returncode: return 'geometry failed', rx.stderr.strip()[:160], None
+     base = None
+     for t, job in enumerate(jobs):
+@@ -746,7 +746,7 @@ def finish(key, w, j, c1):
+         extra = {l: t for l, t in dmsh_entry.int_inputs(src).items() if l not in j['attr']}
+         if extra:
+             j['attr'].update(extra); jp = os.path.join(w, f'job1_{key}.json'); json.dump([j], open(jp, 'w'))
+-            rx = subprocess.run([XLATE, jp, w], capture_output=True, text=True)
++            rx = subprocess.run([*dmsh_chain.xlate_cmd(XLATE), jp, w], capture_output=True, text=True)
+             if rx.returncode or not os.path.exists(os.path.join(w, key + '.spv')): return 'translation failed', ('integer-input retranslation: ' + rx.stderr.strip())[:160], None
+             spv_single_lane(os.path.join(w, key + '.spv'))
+             r = subprocess.run([SPIRV_CROSS, *dmsh_atomic.cross_args(XC, os.path.join(w, key + '.spv')), os.path.join(w, key + '.spv'), '--output', msl], capture_output=True, text=True)
+@@ -950,7 +950,7 @@ def translate(batch):
+     for k in miss: jobs[k], c1s[k] = job_for(k, loc[k][0], rec_of(k)[1], wb)
+     def xl(ch):
+         jp = os.path.join(wb, f'job_{abs(hash(ch[0]))}.json'); json.dump([jobs[k] for k in ch], open(jp, 'w'))
+-        return subprocess.run([XLATE, jp, wb], capture_output=True, text=True)
++        return subprocess.run([*dmsh_chain.xlate_cmd(XLATE), jp, wb], capture_output=True, text=True)
+     with cf.ThreadPoolExecutor(NJ) as ex:
+         for r in ex.map(xl, [c for c in (miss[i::NJ] for i in range(NJ)) if c]): xlate_errors(r)
+     return wb
+@@ -960,7 +960,7 @@ def restored(key, wb):
+     PRE_STATS['hit'] -= 1; PRE_STATS['miss'] += 1; PRE_STATS['pruned meanwhile'] += 1
+     jobs[key], c1s[key] = job_for(key, loc[key][0], rec_of(key)[1], wb)
+     jp = os.path.join(wb, f'job1_{key}.json'); json.dump([jobs[key]], open(jp, 'w'))
+-    xlate_errors(subprocess.run([XLATE, jp, wb], capture_output=True, text=True))
++    xlate_errors(subprocess.run([*dmsh_chain.xlate_cmd(XLATE), jp, wb], capture_output=True, text=True))
+     return False
+ DONE = collections.Counter()
+ def fin(key, wb):
+diff --git a/dm/gfx/tools/dmsh_chain.py b/dm/gfx/tools/dmsh_chain.py
+index 05b7c66b..3eaa7315 100644
+--- a/dm/gfx/tools/dmsh_chain.py
++++ b/dm/gfx/tools/dmsh_chain.py
+@@ -28,6 +28,12 @@ LOCK = os.path.join(HERE, 'dmsh_chain.lock'); HEADER = os.path.join(GFX, 'nvn/dm
+ STAMP = 'inputs.tsv'   # in the library directory b-<V>/
+ # the translator defaults to the in-repo build that matches the lock file (dm/tools/native_tools.sh; a rebuild has another fingerprint)
+ XLATE_DIR = os.path.dirname(os.environ.get('XLATE', os.path.join(HERE, 'dmsh_xlate_bin/dmsh_xlate')))
++def xlate_cmd(path):   # local (oot-mac): the committed translator was linked with the macOS 27.2 SDK and its arm64 half calls pipe2(), which macOS 26 lacks (a null jump at start).
++    # Its x86_64 half is the same program (same --source-sha) and runs under Rosetta. DM_XLATE_X86=1/0 forces it on/off; default: on below macOS 27
++    import platform
++    want = os.environ.get('DM_XLATE_X86')
++    if want is None: want = '1' if int((platform.mac_ver()[0] or '99').split('.')[0]) < 27 else '0'
++    return ['arch', '-x86_64', str(path)] if want == '1' else [str(path)]
+ # spirv-cross likewise: the in-repo build (spirv_cross_bin/build.sh, a pinned upstream commit) that matches the lock file, not the one on PATH, so every Mac converts with the same build
+ SPIRV_CROSS = os.environ.get('SPIRV_CROSS', os.path.join(HERE, 'spirv_cross_bin/spirv-cross'))
+ 
+diff --git a/dm/gfx/tools/tool_lock.py b/dm/gfx/tools/tool_lock.py
+index 25643f71..b715d218 100755
+--- a/dm/gfx/tools/tool_lock.py
++++ b/dm/gfx/tools/tool_lock.py
+@@ -26,7 +26,7 @@ NO_RUN = 'does not run'
+ def xlate_embedded():
+     """The source digest the translator embeds (dmsh_xlate --source-sha), or 'does not run (<its first error line>)', so a translator that cannot start (missing, not executable, a download
+     quarantined by macOS) is named as such rather than read as an empty digest and a stale translator"""
+-    try: r = subprocess.run([os.path.join(XLATE_DIR, 'dmsh_xlate'), '--source-sha'], capture_output=True, text=True, errors='replace', timeout=60)
++    try: r = subprocess.run([*__import__('dmsh_chain').xlate_cmd(os.path.join(XLATE_DIR, 'dmsh_xlate')), '--source-sha'], capture_output=True, text=True, errors='replace', timeout=60)
+     except (OSError, subprocess.SubprocessError) as e: return f'{NO_RUN} ({e})'
+     if r.returncode == 0 and r.stdout.strip(): return r.stdout.strip()
+     return '%s (%s)' % (NO_RUN, (r.stderr.strip().splitlines() or r.stdout.strip().splitlines() or [f'exit code {r.returncode}'])[0])
+diff --git a/scripts/build_ipa_from_nsp.py b/scripts/build_ipa_from_nsp.py
+index ea93a429..1c2a61ff 100755
+--- a/scripts/build_ipa_from_nsp.py
++++ b/scripts/build_ipa_from_nsp.py
+@@ -1173,7 +1173,7 @@ def check_ios_sdk(env):   # the iOS platform is a separate download in Xcode's C
+ def check_translator(xlate, env):
+     """The shader translator is a committed native executable (dm/tools/native_tools.sh, universal): one short run of `--source-sha`, which translates nothing, shows before the extraction
+     that it starts (not missing, executable, not held back by macOS), where dmsh_build.py would stop at the shader step (tool_lock.py xlate_embedded reports the same failure there)"""
+-    try: r = subprocess.run([str(xlate), '--source-sha'], capture_output=True, text=True, env=env, timeout=60, errors='replace')
++    try: r = subprocess.run([*(['arch', '-x86_64'] if (os.environ.get('DM_XLATE_X86') or ('1' if int((__import__('platform').mac_ver()[0] or '99').split('.')[0]) < 27 else '0')) == '1' else []), str(xlate), '--source-sha'], capture_output=True, text=True, env=env, timeout=60, errors='replace')
+     except (OSError, subprocess.SubprocessError) as e: raise BuildError(f'the shader translator does not start ({e}): {xlate}') from e
+     if r.returncode == 0 and r.stdout.strip(): return
+     why = (r.stderr.strip().splitlines() or r.stdout.strip().splitlines() or [f'exit code {r.returncode}'])[0]

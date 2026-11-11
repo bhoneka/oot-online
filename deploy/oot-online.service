@@ -1,0 +1,21 @@
+[Unit]
+Description=OoT Online shared-world server (UDP 4697; status page on TCP 4696)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=ootonline
+WorkingDirectory=/opt/oot-online/server
+# --http-host 0.0.0.0: the status page and /api/state are public; the admin calls answer only on the server itself
+# (ssh -L 4696:localhost:4696 to use them from your Mac). Friends only: add --code SOMEWORD
+ExecStart=/usr/bin/node server.js --http-host 0.0.0.0 --build e0f3ccfa,33fa6c2c
+Restart=always
+RestartSec=3
+Nice=-5
+LimitNOFILE=65536
+ProtectSystem=full
+ProtectHome=true
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

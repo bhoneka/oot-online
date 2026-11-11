@@ -1,0 +1,34 @@
+diff --git a/dm/gfx/tools/dmsh_pch.py b/dm/gfx/tools/dmsh_pch.py
+index c18c5738..5b8fb381 100644
+--- a/dm/gfx/tools/dmsh_pch.py
++++ b/dm/gfx/tools/dmsh_pch.py
+@@ -6,7 +6,7 @@
+ # time. The output is byte-identical (checked on a shader of every kind in make(), so a compiler that behaves otherwise builds without the header), so -include-pch is not in the compile records
+ # (dmsh_build.py MAC_RECORD, ios_metal.RECORD), and like dmsh_mtlcache.py this file is not part of the chain version: it never changes the code in an output, it only makes one faster and keeps the source's name out of it (_run).
+ # One header per compile convention, made at the first compile of a process (about 2 s) and removed when it ends. Environment: DMSH_PCH=0 compiles without it.
+-import atexit, os, shutil, subprocess, sys, tempfile, threading
++import atexit, os, re, shutil, subprocess, sys, tempfile, threading
+ 
+ SAMPLED = ('texture2d', 'texture2d_array', 'texture3d', 'texturecube', 'texturecube_array', 'depth2d', 'depth2d_array', 'depthcube', 'depthcube_array')
+ WRITTEN = ('texture2d', 'texture2d_array', 'texture3d')
+@@ -55,10 +55,19 @@ def header(metal):   # the path of the convention's header, None when it is not
+         return _headers[tuple(metal)]
+ 
+ 
++# Local (oot-mac): Xcode 27.1's Metal compiler (metalfe-32023.921) wants an address space on a reference parameter; Xcode 27.2's
++# (32023.922, the lock's) takes it as thread. dmsh_rewrite.py's blend helper writes `main0_out& dm_o` without one, so on 27.1 every
++# shader with it failed ("reference type must have explicit address space qualifier": 10,629 of Ocarina of Time's 14,855). The helper
++# gets the thread it means at compile time, the same code on 27.2; here and not in dmsh_rewrite.py so the chain version (and the
++# libraries already built) stays the same
++_BLEND_REF = re.compile(rb'(void dm_blend\d+\()(main\w*_out& )')
++
+ def _run(metal, msl, air, **kw):
+     # The source on standard input, so no file name reaches the compiler: clang names a source's static initializer after its file (_GLOBAL__sub_I_<name>, which any function constant brings),
+     # so the same text under two names gave two libraries, and shaders sharing a source (3,936 of Breath of the Wild's 10,560 pixel shaders, in their _bl) took the bytes of whichever compiled first
+-    with open(msl, 'rb') as f: return subprocess.run([*metal, '-x', 'metal', '-', '-o', air], stdin=f, **kw)
++    with open(msl, 'rb') as f: src = f.read()
++    src = _BLEND_REF.sub(rb'\1thread \2', src)
++    return subprocess.run([*metal, '-x', 'metal', '-', '-o', air], input=src, **kw)
+ 
+ 
+ def compile(metal, msl, air):

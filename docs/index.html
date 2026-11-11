@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>OoT Online: Ocarina of Time, together</title>
+<meta name="description" content="A shared Hyrule Field for Ocarina of Time on your Mac: see each other, chat, pick your tunic, shoot each other with arrows. Built from your own copy of the game.">
+<meta property="og:title" content="OoT Online">
+<meta property="og:description" content="Ocarina of Time, together. A shared Hyrule Field on your Mac.">
+<meta property="og:image" content="https://bhoneka.github.io/oot-online/img/drawbridge.jpg">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@600;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+:root { --bg: #0b0f0c; --panel: rgba(20, 28, 22, 0.86); --line: rgba(214, 190, 120, 0.22); --gold: #d8bd73; --gold2: #f1dc9c;
+        --text: #e9e6dc; --mute: #a9a690; --green: #7fbf6a; --red: #d9705f; --code: #121a14; }
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.6 Inter, system-ui, -apple-system, sans-serif; }
+a { color: var(--gold2); }
+.hero { position: relative; min-height: 92vh; display: flex; align-items: flex-end; overflow: hidden; }
+.hero img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; object-position: center 40%; }
+.hero::after { content: ""; position: absolute; inset: 0; background: linear-gradient(180deg, rgba(11,15,12,0.15) 0%, rgba(11,15,12,0.25) 45%, rgba(11,15,12,0.96) 100%); }
+.hero .inner { position: relative; z-index: 1; width: 100%; max-width: 980px; margin: 0 auto; padding: 0 20px 64px; }
+h1 { font-family: Cinzel, Georgia, serif; font-size: clamp(44px, 8vw, 92px); line-height: 1; margin: 0 0 12px; color: var(--gold2);
+     letter-spacing: 0.02em; text-shadow: 0 2px 18px rgba(0,0,0,0.6); }
+.tag { font-size: clamp(18px, 2.6vw, 24px); margin: 0 0 26px; max-width: 640px; text-shadow: 0 1px 10px rgba(0,0,0,0.7); }
+.btns { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
+.btn { display: inline-block; padding: 12px 22px; border-radius: 8px; font-weight: 600; text-decoration: none; border: 1px solid var(--gold);
+       background: linear-gradient(180deg, #e2c983, #b9974f); color: #1b1408; }
+.btn.ghost { background: rgba(0,0,0,0.35); color: var(--gold2); }
+.pill { display: inline-flex; align-items: center; gap: 8px; padding: 6px 12px; border-radius: 999px; background: rgba(0,0,0,0.45);
+        border: 1px solid var(--line); font-size: 14px; color: var(--mute); }
+.dot { width: 9px; height: 9px; border-radius: 50%; background: var(--mute); }
+.dot.on { background: var(--green); box-shadow: 0 0 8px var(--green); }
+main { max-width: 980px; margin: 0 auto; padding: 0 20px 40px; }
+section { padding: 44px 0 8px; }
+h2 { font-family: Cinzel, Georgia, serif; color: var(--gold); font-size: 30px; margin: 0 0 14px; letter-spacing: 0.02em; }
+p { margin: 0 0 14px; }
+.grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin-top: 18px; }
+figure { margin: 0; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+figure img { display: block; width: 100%; aspect-ratio: 16 / 9; object-fit: cover; }
+figcaption { padding: 10px 12px; font-size: 14px; color: var(--mute); }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 20px 22px; }
+ul { margin: 0 0 14px; padding-left: 22px; }
+li { margin: 6px 0; }
+.cmd { display: flex; align-items: stretch; margin: 14px 0; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; background: var(--code); }
+.cmd code { flex: 1; padding: 14px 16px; font: 15px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--gold2); overflow-x: auto; white-space: nowrap; }
+.cmd button { border: 0; border-left: 1px solid var(--line); background: rgba(216,189,115,0.12); color: var(--gold2); font: 600 14px Inter, sans-serif;
+              padding: 0 18px; cursor: pointer; }
+.cmd button:hover { background: rgba(216,189,115,0.22); }
+kbd { font: 600 13px ui-monospace, Menlo, monospace; padding: 2px 7px; border-radius: 5px; border: 1px solid var(--line); background: var(--code); color: var(--gold2); }
+.two { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.note { color: var(--mute); font-size: 14px; }
+footer { border-top: 1px solid var(--line); margin-top: 48px; padding: 24px 20px 40px; text-align: center; color: var(--mute); font-size: 14px; }
+@media (max-width: 760px) {
+  .grid, .two { grid-template-columns: 1fr; }
+  .hero { min-height: 78vh; }
+}
+</style>
+</head>
+<body>
+<header class="hero">
+  <img src="img/drawbridge.jpg" alt="Young Link on the Castle Town drawbridge at night, another player beside him">
+  <div class="inner">
+    <h1>OoT Online</h1>
+    <p class="tag">Ocarina of Time, together. A shared Hyrule Field on your Mac: see each other, chat, pick your tunic, and shoot
+      each other with arrows.</p>
+    <div class="btns">
+      <a class="btn" href="#get">Get it</a>
+      <a class="btn ghost" href="https://github.com/bhoneka/oot-online">GitHub</a>
+      <span class="pill"><span class="dot" id="dot"></span><span id="server">Server: checking…</span></span>
+    </div>
+  </div>
+</header>
+
+<main>
+  <section>
+    <h2>What it is</h2>
+    <p>OoT Online puts everyone who plays into one Hyrule Field. It runs The Legend of Zelda: Ocarina of Time for Nintendo
+      Switch 2 natively on Macs with an Apple chip, at 60 fps, and adds the other players: each one is a Link of their own age
+      walking with Link's own animations. The lobby, the notices and the prompts are the game's own menus.</p>
+    <div class="grid">
+      <figure><img src="img/lobby.jpg" alt="The lobby in the game's own menu: Play, Tunic, Name" loading="lazy"><figcaption>The lobby is the game's own menu: Play, Tunic, Name.</figcaption></figure>
+      <figure><img src="img/aim.jpg" alt="Aiming the slingshot at another player" loading="lazy"><figcaption>Your bow or slingshot is on ZR. Aim, let go.</figcaption></figure>
+      <figure><img src="img/hit.jpg" alt="The game's info bar says Mido shot you" loading="lazy"><figcaption>Hits land. Go down and you are back in seconds.</figcaption></figure>
+    </div>
+  </section>
+
+  <section id="get">
+    <h2>Get it</h2>
+    <div class="card">
+      <p><strong>You need your own copy of the game.</strong> OoT Online contains nothing from it and downloads nothing from it:
+        it builds the game from your own dump (a <code>.nup</code> of Ocarina of Time from your own Switch 2), on your Mac.</p>
+      <ul>
+        <li>A Mac with an Apple chip (M1 or later), macOS 26.6 or later, about 60 GB free.</li>
+        <li>Xcode from the App Store, then once in Terminal: <code>xcodebuild -downloadComponent MetalToolchain</code></li>
+        <li><a href="https://brew.sh">Homebrew</a>.</li>
+      </ul>
+      <p>Then open Terminal and paste:</p>
+      <div class="cmd"><code id="install">curl -fsSL https://bhoneka.github.io/oot-online/install.sh | zsh</code><button id="copy" type="button">Copy</button></div>
+      <p class="note">It asks for your game file and builds <strong>Ocarina of Time Online</strong> into your Applications folder.
+        The first build takes one to three hours (it compiles about 43,000 shaders for your Mac) and happens once. Run the
+        same line again later to update; that takes minutes.</p>
+    </div>
+  </section>
+
+  <section>
+    <h2>Play</h2>
+    <div class="two">
+      <div class="card">
+        <p>Open <strong>Ocarina of Time Online</strong>. Load your save, or start a <strong>New Game</strong>: online, a new
+          game skips the opening and puts you in Hyrule Field a few seconds later.</p>
+        <p>When Link is in the world the lobby comes up. <strong>Play</strong> takes you to the meeting place in front of the
+          Castle Town drawbridge.</p>
+      </div>
+      <div class="card">
+        <ul>
+          <li><kbd>ZR</kbd> hold to aim, let go to shoot (young Link: the slingshot; adult Link: the bow).</li>
+          <li><kbd>T</kbd> chat. <kbd>/</kbd> commands: <code>/who</code>, <code>/w name text</code>, <code>/me</code>, <code>/stats</code>, <code>/lobby</code>.</li>
+          <li>Tunic: Kokiri, Goron or Zora, picked in the lobby (adult Link shows it).</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Your save is safe</h2>
+    <p>Online, the app plays on a fresh copy of your save, made every time it starts. Nothing you do online reaches your real
+      save, and the copy is never synced to the cloud. Play the story as always: start the plain game.</p>
+  </section>
+
+  <section>
+    <h2>Run your own server</h2>
+    <p>The server is a single Node.js program with no dependencies. On a small Linux box: <code>zsh deploy/push.sh
+      root@&lt;address&gt;</code> from the repository installs it as a service. Friends only: <code>--code SOMEWORD</code>.
+      Point the installer at it with <code>OOT_ONLINE_SERVER=&lt;address&gt;:4697</code>.
+      <a href="https://github.com/bhoneka/oot-online">Everything is on GitHub.</a></p>
+  </section>
+</main>
+
+<footer>
+  A fan project. Not affiliated with or endorsed by Nintendo. You need your own copy of the game; OoT Online does not
+  include, download or link to any game files.
+</footer>
+
+<script>
+document.getElementById('copy').addEventListener('click', async () => {
+  const b = document.getElementById('copy');
+  try { await navigator.clipboard.writeText(document.getElementById('install').textContent); b.textContent = 'Copied'; }
+  catch (e) { b.textContent = 'Select it'; }
+  setTimeout(() => { b.textContent = 'Copy'; }, 1800);
+});
+// The public server's address (server.txt) and, when it has one, its HTTPS status (status.txt: a URL serving /api/state)
+(async () => {
+  const s = document.getElementById('server'), d = document.getElementById('dot');
+  let addr = '';
+  try { const r = await fetch('server.txt', { cache: 'no-store' }); if (r.ok) addr = (await r.text()).trim().split('\n')[0]; } catch (e) {}
+  if (!addr) { s.textContent = 'Server: opening soon'; return; }
+  s.textContent = 'Server: ' + addr;
+  try {
+    const u = (await (await fetch('status.txt', { cache: 'no-store' })).text()).trim();
+    if (!u) return;
+    const st = await (await fetch(u + '/api/state?limit=1', { cache: 'no-store' })).json();
+    const n = (st.online != null ? st.online : (st.players || []).length);
+    d.classList.add('on'); s.textContent = n + (n === 1 ? ' player' : ' players') + ' online';
+  } catch (e) {}
+})();
+</script>
+</body>
+</html>

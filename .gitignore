@@ -1,0 +1,15 @@
+# Kept on the developer's Mac, never published: test runs (logs, screenshots, saves, a data mod made from a dump), the
+# reverse-engineering notes and their tables (made from a dump), fonts taken from a dump, the server's live data
+runs/
+re/
+cache/
+server/data/
+patches/UPSTREAM-*.md
+# built test programs
+client/mp_test
+client/tests/host_sim
+client/tests/overlay_shot
+client/tests/glyph_sheet
+*.dSYM/
+__pycache__/
+.DS_Store
