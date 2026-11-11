@@ -28,7 +28,7 @@ affected: those scripts run for a new game only. Only the OoT Online app loads t
 import bisect, copy, os, pathlib, re, struct, sys, zlib
 import zstandard
 HERE = pathlib.Path(__file__).resolve().parent
-sys.path.insert(0, str(HERE)); sys.path.insert(0, str(pathlib.Path.home() / 'nxnative/dm/tools'))
+sys.path.insert(0, str(HERE)); sys.path.insert(0, str(pathlib.Path(os.environ.get('NXNATIVE_DIR') or pathlib.Path.home() / 'nxnative') / 'dm/tools'))   # the setup's nxnative (NXNATIVE_DIR), else ~/nxnative
 import romfs, romfs_read
 from totkwrite import read_byml, read_sarc, write_byml, write_sarc_oot as write_sarc   # OoT's archive layout (byte-exact on the game's own packs)
 

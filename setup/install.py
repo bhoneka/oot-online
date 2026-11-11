@@ -152,16 +152,17 @@ def build_game(tree, nup, app, work, env_file, logs, commit):
     if not (app / 'Contents/MacOS/dmhost').is_file(): raise Stop(f'the build ended without the app: see {logs / "build.log"}')
 
 
-def online_files(work, data, logs):
+def online_files(work, data, logs, tree):
     images = sorted(work.glob('extract/v*/RomFS.img'), key=lambda p: int(re.sub(r'\D', '', p.parent.name) or 0))
     if not images: raise Stop(f'the build left no RomFS image in {work / "extract"}')
     romfs = images[-1]   # the newest version the build unpacked: the one the app runs
     emit('stage', name='The game\'s fonts', step=romfs.parent.name)
     (data / 'oot_online/fonts').mkdir(parents=True, exist_ok=True)
-    run([sys.executable, '-I', '-B', OOT / 'tools/game_fonts.py', romfs, data / 'oot_online/fonts', 'Clarimo', 'Cetra', 'External', 'NinDev', 'Symbol', 'ZeldaGlyphs'], log=logs / 'fonts.log')
+    env = tool_env(NXNATIVE_DIR=tree)   # the tools read the image with nxnative's RomFS reader
+    run([sys.executable, '-I', '-B', OOT / 'tools/game_fonts.py', romfs, data / 'oot_online/fonts', 'Clarimo', 'Cetra', 'External', 'NinDev', 'Symbol', 'ZeldaGlyphs'], log=logs / 'fonts.log', env=env)
     emit('stage_end', name='The game\'s fonts', ok=True)
     emit('stage', name='The other players\' stand-ins', step='')
-    run([sys.executable, '-I', '-B', OOT / 'tools/make_online_mod.py', romfs, data / 'oot_online/romfs'], log=logs / 'mod.log')
+    run([sys.executable, '-I', '-B', OOT / 'tools/make_online_mod.py', romfs, data / 'oot_online/romfs'], log=logs / 'mod.log', env=env)
     emit('stage_end', name='The other players\' stand-ins', ok=True)
     env_txt = data / 'env.txt'
     if env_txt.is_file():   # an earlier version of the setup put OoT Online's switches in the game's shared env.txt: taken out again (they live in the app)
@@ -218,7 +219,7 @@ def main():
         env_file = support / 'online_env.txt'   # OoT Online's switches go into the app's own env file (Contents/Resources/dm/env.txt): the save is never written online (hle_mp.c)
         env_file.write_text(f'DM_ROMFS_OVERLAY={data}/oot_online/romfs\nDM_MP_STANDIN=OnlinePlayer\nDM_MP_LIVE=1\n' + (f'DM_MP_SERVER={server}\n' if server else ''))
         phase(3); app.parent.mkdir(parents=True, exist_ok=True); build_game(tree, nup, app, work, env_file, logs, commit)
-        phase(4); online_files(work, data, logs)
+        phase(4); online_files(work, data, logs, tree)
         phase(5)
         if a.skip_pipelines: say('render pipelines: left to the game\'s first start (--skip-pipelines)')
         else: prebuild_pipelines(app, data, logs)

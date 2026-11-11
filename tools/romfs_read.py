@@ -2,9 +2,9 @@
 # Reads one file out of a player's own RomFS image (nxnative's RomFS.img), undoing the game's zstd (with its ZsDic
 # dictionaries) when the name ends in .zs. Used to take the game's own fonts and UI art for OoT Online's screens.
 #   romfs_read.py <RomFS.img> <path in the RomFS> [out]      (no out: prints the size and the first bytes)
-import sys, struct, pathlib
+import os, sys, struct, pathlib
 from compression import zstd
-sys.path.insert(0, str(pathlib.Path.home() / 'nxnative' / 'dm' / 'tools'))
+sys.path.insert(0, str(pathlib.Path(os.environ.get('NXNATIVE_DIR') or pathlib.Path.home() / 'nxnative') / 'dm' / 'tools'))   # nxnative's RomFS reader: the setup's checkout (NXNATIVE_DIR), else ~/nxnative
 import romfs
 
 def sarc_files(b):

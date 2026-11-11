@@ -65,6 +65,7 @@ say "5/5 The game's fonts for OoT Online's screens, the other players' stand-ins
 mkdir -p "$DATA/oot_online/fonts"
 romfs_list=("$WORK"/extract/v<->/RomFS.img(Nn)); ROMFS=${romfs_list[-1]:-}   # the newest version the build unpacked (the one the app runs; n = numeric order)
 [[ -f "$ROMFS" ]] || fail "the build left no RomFS image in $WORK/extract"
+export NXNATIVE_DIR="$NX"   # the tools read the image with this checkout's RomFS reader
 "$BASE/venv/bin/python" -I "$ROOT/tools/game_fonts.py" "$ROMFS" "$DATA/oot_online/fonts" Clarimo Cetra External NinDev Symbol ZeldaGlyphs >/dev/null
 "$BASE/venv/bin/python" -I "$ROOT/tools/make_online_mod.py" "$ROMFS" "$DATA/oot_online/romfs" >/dev/null
 if [[ -f "$DATA/env.txt" ]]; then   # an earlier version of this setup put OoT Online's switches in the shared env.txt: taken out again
