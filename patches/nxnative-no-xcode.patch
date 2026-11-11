@@ -218,10 +218,10 @@ index 00000000..d9ecd465
 +}
 diff --git a/dm/gfx/tools/dmsh_rtc.py b/dm/gfx/tools/dmsh_rtc.py
 new file mode 100644
-index 00000000..df2f2146
+index 00000000..f938a3b9
 --- /dev/null
 +++ b/dm/gfx/tools/dmsh_rtc.py
-@@ -0,0 +1,157 @@
+@@ -0,0 +1,174 @@
 +#!/usr/bin/env python3
 +# The Mac shader libraries' Metal compile without Xcode (DMSH_METAL=runtime): macOS's own run-time compiler, the one every Metal app compiles source with, through dmsh_rtc
 +# (dmsh_rtc.m: one process for the whole build, compiling as many shaders at once as the Mac has cores), with the offline compile's options (-O1, -fwrapv, the bracket depth,
@@ -268,7 +268,19 @@ index 00000000..df2f2146
 +
 +
 +def gpu_arch(): return _tool('--arch')   # applegpu_g17s
-+def check(): _tool('--check')   # raises OSError with the reason when this Mac cannot compile and write a library
++
++
++def check():
++    """Raises OSError with the reason when this Mac cannot make the libraries: the tool's own test (the compiler arguments, writing a library), then one library through the
++    whole path (the tool's server, canonical), so a macOS whose run-time compiler writes another layout stops here and not shader by shader"""
++    _tool('--check')
++    import tempfile
++    with tempfile.TemporaryDirectory(prefix='dmsh_rtc_check_') as t:
++        msl, lib = os.path.join(t, 'check.metal'), os.path.join(t, 'check.metallib')
++        with open(msl, 'w') as f: f.write('#include <metal_stdlib>\nusing namespace metal;\nkernel void dmsh_rtc_check(device uint *o [[buffer(0)]], uint i [[thread_position_in_grid]]) { o[i] = i * 3u; }\n')
++        try: compile(msl, lib)
++        except subprocess.CalledProcessError as e: raise OSError(f'a test library does not compile: {(e.stderr or b"").decode(errors="replace")[:300]}') from e
++        except ValueError as e: raise OSError(f'this macOS\'s run-time compiler writes a library layout dmsh_rtc.py does not know ({e})') from e
 +
 +
 +class _Server:
@@ -293,7 +305,8 @@ index 00000000..df2f2146
 +        with self.lock:
 +            if self.p.poll() is not None: return f'error\tthe compile tool stopped (exit code {self.p.returncode})'
 +            self.wait[rid] = slot
-+            self.p.stdin.write(f'{rid}\t{msl}\t{lib}\n'); self.p.stdin.flush()
++            try: self.p.stdin.write(f'{rid}\t{msl}\t{lib}\n'); self.p.stdin.flush()
++            except OSError as e: self.wait.pop(rid, None); return f'error\tthe compile tool stopped ({e})'   # the next compile starts it again
 +        slot[0].wait()
 +        return slot[1]
 +
@@ -305,7 +318,7 @@ index 00000000..df2f2146
 +    with _server_lock:
 +        if _server is None or _server.p.poll() is not None: _server = _Server()
 +    with open(msl, 'rb') as f: src = f.read()
-+    tmp = f'{lib}.rtc-{os.getpid()}-{threading.get_ident()}'
++    tmp = f'{lib}.tmp-rtc-{os.getpid()}-{threading.get_ident()}'   # '.tmp' in every name: a stopped build's leftovers are no library (shader_lib.py _names)
 +    use = msl
 +    if _BLEND_REF.search(src):
 +        use = tmp + '.metal'
@@ -315,8 +328,12 @@ index 00000000..df2f2146
 +        if status != 'ok':
 +            print(f'{msl}: does not compile (macOS run-time compiler): {why}', file=sys.stderr, flush=True)
 +            raise subprocess.CalledProcessError(1, [TOOL, '--serve'], stderr=why.encode())
-+        with open(tmp, 'rb') as f: data = canonical(f.read())
-+        part = lib + '.part'
++        try:
++            with open(tmp, 'rb') as f: data = canonical(f.read())
++        except ValueError as e:
++            print(f'{msl}: the run-time compiler wrote a library this file does not know ({e})', file=sys.stderr, flush=True)
++            raise subprocess.CalledProcessError(1, [TOOL, '--serve'], stderr=str(e).encode()) from e
++        part = lib + '.tmp-rtc-part'
 +        with open(part, 'wb') as f: f.write(data)
 +        os.replace(part, lib)
 +    finally:
@@ -617,7 +634,7 @@ index 00000000..c130d192
 +    if len(sys.argv) != 3: sys.exit('usage: prebuild.py <game title ID> <out folder>')
 +    main(*sys.argv[1:])
 diff --git a/scripts/build_ipa_from_nsp.py b/scripts/build_ipa_from_nsp.py
-index 1c2a61ff..afcdebed 100755
+index 1c2a61ff..2b0ccf2b 100755
 --- a/scripts/build_ipa_from_nsp.py
 +++ b/scripts/build_ipa_from_nsp.py
 @@ -84,6 +84,10 @@ PROGRAM_INDEX = 0                       # a multi-program application (Super Mar
@@ -764,11 +781,12 @@ index 1c2a61ff..afcdebed 100755
      ap.add_argument('--profile-out', help='where the provisional profile goes (default: <build folder>/profile: <NSP folder>/<title ID>_build/profile, or under --work-dir)')
      ap.add_argument('--provisional', action='store_true', help='build from a provisional profile even when dm/games has one for the game (tests the guesses)')
      ap.add_argument('--no-heap-check', action='store_true', help='a provisional profile: skip the heap check and the address region check on the Mac (the alias / heap split stays a guess); a derived profile: skip the address region check')
-@@ -2920,6 +2989,14 @@ def main(args=None):
+@@ -2920,6 +2989,15 @@ def main(args=None):
      if mac and prepare_xcode: raise BuildError(f'--prepare-xcode makes an iPhone project: it cannot be combined with --platform {platform}')
      if mac and not apple_silicon(): raise BuildError(f'--platform {platform} runs the game in the Mac host, which runs the game\'s own arm64 code natively: it needs a Mac with Apple silicon, and this Mac has an Intel processor')
      check_native_python()
 +    global PREBUILT_SET   # (ALLOW_OTHER_METAL is global in main already)
++    PREBUILT_SET = None   # Spyder runs the next F5 in the same process
 +    if args.no_xcode or NO_XCODE:   # no Xcode (NO_XCODE): everything a compiler would make comes from the prebuilt folder, the shaders from macOS's run-time compiler
 +        if not mac: raise BuildError('--no-xcode builds for the Mac only (--platform mac or mac-app): an iPhone build needs Xcode')
 +        PREBUILT_SET = prebuilt_manifest(Path(os.path.expanduser(args.prebuilt or PREBUILT)).resolve() if (args.prebuilt or PREBUILT) else repo / 'prebuilt')
@@ -779,7 +797,7 @@ index 1c2a61ff..afcdebed 100755
      keep = KEEP_EXTRACTED if args.keep_extracted is None else args.keep_extracted
      if mac and not keep: say('keeping the extracted game files all the same: the game runs from them on the Mac' + (' and the app is made of clones of them' if mac_pack else '')); keep = True
      if prepare_xcode and not keep: raise BuildError('--prepare-xcode requires --keep-extracted: Xcode builds from the extracted files')
-@@ -2946,7 +3023,7 @@ def main(args=None):
+@@ -2946,7 +3024,7 @@ def main(args=None):
      lang_in = args.language or LANGUAGE   # checked against the game's languages once its control data is extracted
      want_lang = language_code(lang_in) if lang_in else 'en-US'
      if not want_lang: raise BuildError(f'unknown game language {lang_in!r}; give one of {language_list([c for c, _ in nacp.LANGUAGES])}, by code or by name')

@@ -184,6 +184,9 @@ final class Model: ObservableObject {
     func handle(_ e: [String: Any]) {
         let ev = e["ev"] as? String ?? ""
         let name = e["name"] as? String ?? ""
+        if Model.testEnv["OOT_INSTALLER_NUP"] != nil, ["phase", "stage_end", "done", "error"].contains(ev) {   // a test run: what the window shows, on standard output
+            print("installer: \(ev) \(name.isEmpty ? (e["msg"] as? String ?? e["app"] as? String ?? "") : name)"); fflush(stdout)
+        }
         switch ev {
         case "phase":
             phaseTitle = name; phaseCount = "Step \(e["k"] as? Int ?? 0) of \(e["n"] as? Int ?? 0)"
