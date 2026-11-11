@@ -13,21 +13,22 @@ Website: **https://bhoneka.github.io/oot-online/**
 - A Mac with an Apple chip (M1 or later) on macOS 26.6 or later, and about 60 GB free.
 - **Your own copy of the game**, dumped from your own Switch 2 as a `.nup` file. OoT Online contains nothing from the game
   and downloads nothing from it: it builds the game from your file, on your Mac.
-- Xcode from the App Store (for its Metal shader compiler), then once in Terminal:
-  `xcodebuild -downloadComponent MetalToolchain`
-- [Homebrew](https://brew.sh).
+
+Nothing else: no Xcode, no Homebrew, no Terminal.
 
 ## Install
 
-Open Terminal and paste:
+1. **[Download the installer](https://github.com/bhoneka/oot-online/releases/latest/download/Install-OoT-Online.zip)** and open
+   **Install OoT Online** (double-click the zip first if your browser left it zipped).
+2. The first time, macOS says it cannot check the app for malicious software: it is a free fan project, not signed by Apple.
+   Click **Done**, then open **System Settings → Privacy & Security**, scroll down, click **Open Anyway** next to "Install OoT
+   Online" and confirm. This happens once.
+3. Click **Choose your game file…**, pick your `.nup`, then **Build Ocarina of Time Online**.
 
-```bash
-curl -fsSL https://bhoneka.github.io/oot-online/install.sh | zsh
-```
-
-It asks for your game file, then builds **Ocarina of Time Online** into your Applications folder. The first build takes one
-to three hours (it compiles about 43,000 shaders for your Mac) and is done once; running the same line again later updates
-it in minutes.
+It builds **Ocarina of Time Online** into the Applications folder in your home folder. The first build takes one to three
+hours (it translates and compiles about 43,000 of the game's shaders for your Mac) and is done once; opening the installer
+again later updates it in minutes. On macOS 26 it may ask for your password to install Rosetta, Apple's helper for Intel
+code, which one of its tools needs.
 
 ## Play
 
@@ -55,7 +56,7 @@ cd server && node server.js        # UDP 4697 for games, HTTP 4696 (status page)
 
 On a rented Linux box (Ubuntu or Debian, about 5 a month): `zsh deploy/push.sh root@<its address>` copies the server
 there, installs Node and starts it as a service. `--code SOMEWORD` makes it friends-only. Players point the installer at
-it with `OOT_ONLINE_SERVER=<address>:4697`.
+it under **Options** (`<address>:4697`).
 
 ## How it works
 
@@ -64,7 +65,9 @@ OoT Online adds a small module to nxnative's host (`client/`): it reads Link's s
 and shows the other players as stand-in Links with Link's own animations (their walk and run follow their speed; they
 draw and aim their own bow or slingshot as he does; a player who goes down is knocked flat, lies there and gets back up the
 way the game knocks Link down) and a Navi each. The lobby, the notices and the item
-prompts are the game's own screens and fonts. `setup/ootonline-setup.sh` does the whole build; `server/` is the server.
+prompts are the game's own screens and fonts. The installer (`installer/`, `setup/install.py`) does the whole build without Xcode:
+it compiles the game's shaders with macOS's own Metal compiler, and the parts that need a compiler come prebuilt from GitHub
+Actions; `server/` is the server.
 Both game versions work: the launch version and its update. Technical notes: [DEVELOPMENT.md](DEVELOPMENT.md).
 
 ## Status

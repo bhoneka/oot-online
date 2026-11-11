@@ -1,0 +1,790 @@
+OoT Online: Mac builds without Xcode (applied after the three fix patches; tools/integrate_nxnative.py runs after it).
+Shaders compile through macOS's own run-time compiler (dm/gfx/tools/dmsh_rtc.m/.py), the Mac host and the app's launcher come
+prebuilt (dm/mac/prebuild.py, build_ipa_from_nsp.py --no-xcode), and no xcrun, make, git, otool or zstd command runs.
+
+diff --git a/.gitignore b/.gitignore
+index e482f65a..f725ccbf 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -11,3 +11,5 @@ dm/games/*/cb_extent.tsv
+ .coverage
+ .coverage.*
+ /coverage.json
++# dmsh_rtc.sh builds it (dmsh_rtc.m); shipped prebuilt (dm/mac/prebuild.py), not committed
++dm/gfx/tools/dmsh_rtc_bin/
+diff --git a/dm/gfx/nvn/dmsh_chain.h b/dm/gfx/nvn/dmsh_chain.h
+index ffec284e..6fbd90b4 100644
+--- a/dm/gfx/nvn/dmsh_chain.h
++++ b/dm/gfx/nvn/dmsh_chain.h
+@@ -1,3 +1,3 @@
+ // Generated file (dm/gfx/tools/dmsh_chain.py --header): the B shader library translation chain version this source tree expects (default options), one for every game;
+ // the host loads only <library dir>/b-<V>/. Run dmsh_chain.py --header after changing the chain's tools and commit this file with the change
+-#define DMSH_CHAIN "0aa68e19c9a7"
++#define DMSH_CHAIN "63a49c586dd4"
+diff --git a/dm/gfx/tools/dmsh_build.py b/dm/gfx/tools/dmsh_build.py
+index fd3aca24..e5bbc7bd 100644
+--- a/dm/gfx/tools/dmsh_build.py
++++ b/dm/gfx/tools/dmsh_build.py
+@@ -17,7 +17,7 @@ import dmsh_geometry, dmsh_atomic, dmsh_wide, dmsh_meshstage, dmsh_rewrite, dmsh
+ DM_ROOT = os.environ.get('DM_ROOT') or os.path.expanduser('~/dm-work')   # Workspace root (game files, build outputs and run artifacts are all under it)
+ HOME = os.path.expanduser('~')
+ dm_dir, out = sys.argv[1:3]; want = set(sys.argv[3:]); cache_root = out
+-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); import dmsh_chain, dmsh_fetch, dmsh_facts, dmsh_mtlcache, dmsh_pch, dmsh_vin, dmsh_pull, dmsh_side, dmsh_mesh, dmsh_ampere, shader_regressions, shader_cache, tool_lock   # translation chain version: verify the tools against the lock file first; build output goes into b-<V>/
++sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); import dmsh_chain, dmsh_fetch, dmsh_facts, dmsh_mtlcache, dmsh_pch, dmsh_rtc, dmsh_vin, dmsh_pull, dmsh_side, dmsh_mesh, dmsh_ampere, shader_regressions, shader_cache, tool_lock   # translation chain version: verify the tools against the lock file first; build output goes into b-<V>/
+ _bad = tool_lock.check_tools()
+ if _bad: sys.exit('\n'.join('[RED] translation chain tools do not match the lock file: ' + b for b in _bad) + '\n(if the tools changed, run tool_lock.py --update-lock and commit the lock file; if the translator just was not rebuilt, rebuild it)')
+ CHAIN = dmsh_chain.version(); out = os.path.join(out, 'b-' + CHAIN)
+@@ -70,8 +70,13 @@ MAC_RECORD = ' '.join(MAC_METAL) + '; xcrun -sdk macosx metallib'
+ # (as SDKROOT), and the outputs are the same bytes (.air and .metallib, checked on Odyssey's shaders); without it the driver targets the running macOS, not the SDK, and they differ.
+ # MAC_RECORD names the xcrun command, which runs the same compiler
+ def xcrun_out(*args): return subprocess.run(['xcrun', '-sdk', 'macosx', *args], capture_output=True, text=True, check=True).stdout.strip()
+-MAC_RUN = [xcrun_out('-f', 'metal'), '-isysroot', xcrun_out('--show-sdk-path'), *MAC_METAL[4:]]
+-MAC_LINK = [xcrun_out('-f', 'metallib')]
++# Without Xcode (DMSH_METAL=runtime, the NSP script's --no-xcode): macOS's own run-time compiler with these options and METAL_DEPTH (dmsh_rtc.py), its libraries written in the layout
++# metallib writes; xcrun is not run (on a Mac without the Command Line Tools it offers to install them). Mac libraries only: an iPhone build needs Xcode's iOS compiler
++if dmsh_rtc.RUNTIME and IOSOUT: sys.exit('[RED] DMSH_METAL=runtime compiles Mac libraries only: an iOS build (IOSOUT) needs Xcode')
++if dmsh_rtc.RUNTIME: MAC_RECORD = dmsh_rtc.RECORD
++else:
++    MAC_RUN = [xcrun_out('-f', 'metal'), '-isysroot', xcrun_out('--show-sdk-path'), *MAC_METAL[4:]]
++    MAC_LINK = [xcrun_out('-f', 'metallib')]
+ # -fbracket-depth: the front end stops at 256 nested brackets ("bracket nesting level exceeded maximum of 256"). Ocarina of Time's compute shaders 1f78730053feb036 and e172bd7ec218ab8e
+ # (3.5 MB of MSL each) nest 259 deep in one expression and were left out. A source within the default limit compiles to the same bytes with it (checked on macOS and iOS), so, like the
+ # precompiled header, the records do not name it and the Metal cache keeps its libraries. ios_metal.DEPTH is the same
+@@ -79,6 +84,7 @@ METAL_DEPTH = ['-fbracket-depth=1024']
+ # The outer shader cache restores compiled libraries directly, before the MSL compile cache can check their compiler. Keep override builds separate there too.
+ METAL_FP = dmsh_mtlcache.compiler_id('macosx') + ('\0iphoneos\0' + dmsh_mtlcache.compiler_id('iphoneos') if IOSOUT else '')
+ def mac_compile(msl, air, lib):   # same interface as ios_metal.compile; the precompiled header and METAL_DEPTH change no output, so MAC_RECORD does not name them (dmsh_pch.py)
++    if dmsh_rtc.RUNTIME: dmsh_rtc.compile(msl, lib); return   # no .air: the run-time compiler makes the library in one step
+     dmsh_pch.compile(MAC_RUN + METAL_DEPTH, msl, air)
+     subprocess.run([*MAC_LINK, air, '-o', lib], check=True)
+ 
+diff --git a/dm/gfx/tools/dmsh_mtlcache.py b/dm/gfx/tools/dmsh_mtlcache.py
+index 22504ce4..16e464f6 100644
+--- a/dm/gfx/tools/dmsh_mtlcache.py
++++ b/dm/gfx/tools/dmsh_mtlcache.py
+@@ -25,6 +25,8 @@ def clone(src, dst):
+ 
+ 
+ def compiler_id(sdk):
++    import dmsh_rtc
++    if dmsh_rtc.RUNTIME: return dmsh_rtc.compiler_id() if sdk == 'macosx' else ''   # macOS's run-time compiler (macOS's version and build, the front end's); no iOS compiler, and no xcrun
+     def run(*a): return subprocess.run(['xcrun', '-sdk', sdk, *a], capture_output=True, text=True).stdout
+     tools = ''.join(run(t, '--version') for t in ('metal', 'metallib'))
+     return re.sub(r'(?m)^InstalledDir:.*\n?', '', tools) + run('--show-sdk-version') + run('--show-sdk-build-version')   # the install path changes with each toolchain mount
+diff --git a/dm/gfx/tools/dmsh_rtc.m b/dm/gfx/tools/dmsh_rtc.m
+new file mode 100644
+index 00000000..d9ecd465
+--- /dev/null
++++ b/dm/gfx/tools/dmsh_rtc.m
+@@ -0,0 +1,139 @@
++// dmsh_rtc: the shader libraries' Metal compile on a Mac without Xcode. macOS's own run-time compiler (MTLCompilerService, the
++// compiler every Metal app uses for newLibraryWithSource) takes the offline build's options as compiler arguments, and the
++// library it makes is written to a file (the library's serializeToURL); dmsh_rtc.py turns that file into the layout Xcode's
++// metallib writes, so the host and the tools that read libraries (dmsh_side.cut) see what an Xcode build gives them.
++// Both calls are Metal's own but not in its headers (MTLCompileOptions additionalCompilerArguments, _MTLLibrary
++// serializeToURL:error:): --check fails when a macOS lacks them, and the NSP script stops there with that message.
++// The options are the offline compile's (dmsh_build.py MAC_METAL): -O1, -fwrapv, the bracket depth of Ocarina of Time's
++// largest compute shaders, invariance (MTLCompileOptions preserveInvariance, the driver's -fpreserve-invariance), and no value
++// names (the driver's default, which the front end's arguments do not get).
++// Built by dmsh_rtc.sh (clang, Foundation and Metal); shipped prebuilt where no compiler is (the OoT Online installer).
++// usage: dmsh_rtc --version          one line: macOS's version and build and the Metal front end's version (the compiler's identity)
++//        dmsh_rtc --arch             this Mac's GPU architecture as Metal names it (MTLDevice.architecture, e.g. applegpu_g17s)
++//        dmsh_rtc --check            compile and write a test library; exit 0 when this Mac can, else the reason on standard error
++//        dmsh_rtc --serve [jobs]     compile requests from standard input, one a line: <id> TAB <MSL file> TAB <library file to write>;
++//                                    each answered on standard output when done, in any order: <id> TAB ok TAB <ms>, or
++//                                    <id> TAB error TAB <the compiler's message on one line>. jobs: compiles at once (default: the cores)
++#import <Foundation/Foundation.h>
++#import <Metal/Metal.h>
++#import <objc/message.h>
++#include <stdatomic.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <unistd.h>
++
++static NSString *const ARGS = @"-O1 -fwrapv -fbracket-depth 1024 -discard-value-names";
++
++static MTLCompileOptions *options(void) {
++    MTLCompileOptions *o = [MTLCompileOptions new];
++    o.preserveInvariance = YES;
++    [o setValue:ARGS forKey:@"additionalCompilerArguments"];
++    return o;
++}
++
++static BOOL has_calls(void) {   // asked of an instance: MTLCompileOptions only declares its properties, a private subclass implements them
++    return [[MTLCompileOptions new] respondsToSelector:@selector(setAdditionalCompilerArguments:)] &&
++           [NSClassFromString(@"_MTLLibrary") instancesRespondToSelector:@selector(serializeToURL:error:)];
++}
++
++// One library: the source compiled and written to out. A compile cut off by the compiler service stopping (it is restarted)
++// is tried again. Returns nil, or the reason it failed.
++static NSString *compile_file(id<MTLDevice> dev, MTLCompileOptions *opts, NSString *src, NSString *out) {
++    for (int attempt = 1;; attempt++) @autoreleasepool {
++        NSError *e = nil;
++        id<MTLLibrary> lib = [dev newLibraryWithSource:src options:opts error:&e];
++        if (lib) {
++            if (![lib respondsToSelector:@selector(serializeToURL:error:)]) return @"this macOS cannot write a library it compiled (no serializeToURL)";
++            BOOL ok = ((BOOL (*)(id, SEL, NSURL *, NSError **))objc_msgSend)(lib, @selector(serializeToURL:error:), [NSURL fileURLWithPath:out], &e);
++            return ok ? nil : [NSString stringWithFormat:@"the library was compiled but not written: %@", e.localizedDescription ?: @"no reason given"];
++        }
++        NSString *why = e.localizedDescription ?: @"the compiler gave no reason";
++        if (attempt < 4 && [why containsString:@"XPC_ERROR_CONNECTION_INTERRUPTED"]) { usleep((useconds_t)attempt * 200000); continue; }
++        return why;
++    }
++}
++
++static NSString *one_line(NSString *s) {   // the compiler's errors with the two lines after each (the source line and the caret), not its warnings
++    NSArray<NSString *> *lines = [s componentsSeparatedByCharactersInSet:NSCharacterSet.newlineCharacterSet];
++    NSMutableArray<NSString *> *keep = [NSMutableArray array];
++    for (NSUInteger i = 0; i < lines.count; i++)
++        if ([lines[i] containsString:@"error:"]) for (NSUInteger j = i; j < MIN(i + 3, lines.count); j++) [keep addObject:lines[j]];
++    s = [(keep.count ? keep : lines) componentsJoinedByString:@" | "];
++    s = [s stringByReplacingOccurrencesOfString:@"\t" withString:@" "];
++    return s.length > 4000 ? [s substringToIndex:4000] : s;
++}
++
++static NSString *TEST = @"#include <metal_stdlib>\nusing namespace metal;\n"
++    "struct V { float4 p [[position, invariant]]; };\n"
++    "vertex V dmsh_rtc_v(uint i [[vertex_id]], constant int *b [[buffer(0)]]) { int a = b[i] * 65536; V v; v.p = float4(float((a >> 31) << 16 | int(uint(a) >> 16))); return v; }\n"
++    "fragment float4 dmsh_rtc_f(V in [[stage_in]]) { return in.p; }\n";
++
++// The compiler's version as its libraries record it (llvm.ident in each module, e.g. "Apple metal version 32023.886 (metalfe-32023.886.1)")
++static NSString *front_end(id<MTLDevice> dev) {
++    NSString *out = [NSTemporaryDirectory() stringByAppendingPathComponent:[NSString stringWithFormat:@"dmsh_rtc-%d.metallib", getpid()]];
++    NSString *why = compile_file(dev, options(), TEST, out);
++    if (why) { fprintf(stderr, "dmsh_rtc: %s\n", one_line(why).UTF8String); return nil; }
++    NSData *d = [NSData dataWithContentsOfFile:out]; unlink(out.fileSystemRepresentation);
++    NSString *s = [[NSString alloc] initWithData:d encoding:NSISOLatin1StringEncoding];
++    NSRegularExpression *re = [NSRegularExpression regularExpressionWithPattern:@"Apple metal version [0-9.]+ \\(metalfe-[0-9.]+\\)" options:0 error:nil];
++    NSTextCheckingResult *m = s ? [re firstMatchInString:s options:0 range:NSMakeRange(0, s.length)] : nil;
++    return m ? [s substringWithRange:m.range] : @"Apple metal version unknown";
++}
++
++static int serve(id<MTLDevice> dev, int jobs) {
++    MTLCompileOptions *opts = options();
++    dispatch_semaphore_t slots = dispatch_semaphore_create(jobs);
++    dispatch_group_t all = dispatch_group_create();
++    dispatch_queue_t q = dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0);
++    NSObject *out_lock = [NSObject new];
++    char *line = NULL; size_t cap = 0; ssize_t n;
++    while ((n = getline(&line, &cap, stdin)) > 0) {
++        if (line[n - 1] == '\n') line[--n] = 0;
++        NSArray<NSString *> *f = [@(line) componentsSeparatedByString:@"\t"];
++        if (f.count != 3) { @synchronized (out_lock) { printf("%s\terror\tnot <id> TAB <MSL file> TAB <library file>\n", f.firstObject.UTF8String ?: ""); fflush(stdout); } continue; }
++        dispatch_semaphore_wait(slots, DISPATCH_TIME_FOREVER);
++        dispatch_group_async(all, q, ^{ @autoreleasepool {
++            NSError *e = nil; CFAbsoluteTime t0 = CFAbsoluteTimeGetCurrent();
++            NSString *src = [NSString stringWithContentsOfFile:f[1] encoding:NSUTF8StringEncoding error:&e];
++            NSString *why = src ? compile_file(dev, opts, src, f[2]) : [NSString stringWithFormat:@"cannot read %@: %@", f[1], e.localizedDescription];
++            double ms = (CFAbsoluteTimeGetCurrent() - t0) * 1e3;
++            @synchronized (out_lock) {
++                if (why) printf("%s\terror\t%s\n", f[0].UTF8String, one_line(why).UTF8String);
++                else printf("%s\tok\t%.1f\n", f[0].UTF8String, ms);
++                fflush(stdout);
++            }
++            dispatch_semaphore_signal(slots);
++        }});
++    }
++    dispatch_group_wait(all, DISPATCH_TIME_FOREVER);
++    free(line);
++    return 0;
++}
++
++int main(int argc, char **argv) {
++    @autoreleasepool {
++        if (argc < 2) { fprintf(stderr, "usage: dmsh_rtc --version | --arch | --check | --serve [jobs]\n"); return 2; }
++        id<MTLDevice> dev = MTLCreateSystemDefaultDevice();
++        if (!dev) { fprintf(stderr, "dmsh_rtc: no Metal device\n"); return 1; }
++        if (!strcmp(argv[1], "--arch")) { printf("%s\n", dev.architecture.name.UTF8String); return 0; }
++        if (!has_calls()) { fprintf(stderr, "dmsh_rtc: this macOS's Metal has no way to pass compiler arguments or to write a compiled library (additionalCompilerArguments, serializeToURL)\n"); return 1; }
++        if (!strcmp(argv[1], "--version") || !strcmp(argv[1], "--check")) {
++            NSString *fe = front_end(dev);
++            if (!fe) return 1;
++            if (!strcmp(argv[1], "--version")) {
++                NSOperatingSystemVersion v = NSProcessInfo.processInfo.operatingSystemVersion;
++                NSString *build = [NSDictionary dictionaryWithContentsOfFile:@"/System/Library/CoreServices/SystemVersion.plist"][@"ProductBuildVersion"] ?: @"?";
++                printf("macOS %ld.%ld.%ld (%s) %s\n", (long)v.majorVersion, (long)v.minorVersion, (long)v.patchVersion, build.UTF8String, fe.UTF8String);
++            }
++            return 0;
++        }
++        if (!strcmp(argv[1], "--serve")) {
++            int jobs = argc > 2 ? atoi(argv[2]) : 0;
++            if (jobs <= 0) jobs = (int)NSProcessInfo.processInfo.activeProcessorCount;
++            return serve(dev, jobs);
++        }
++        fprintf(stderr, "dmsh_rtc: unknown option %s\n", argv[1]);
++        return 2;
++    }
++}
+diff --git a/dm/gfx/tools/dmsh_rtc.py b/dm/gfx/tools/dmsh_rtc.py
+new file mode 100644
+index 00000000..df2f2146
+--- /dev/null
++++ b/dm/gfx/tools/dmsh_rtc.py
+@@ -0,0 +1,157 @@
++#!/usr/bin/env python3
++# The Mac shader libraries' Metal compile without Xcode (DMSH_METAL=runtime): macOS's own run-time compiler, the one every Metal app compiles source with, through dmsh_rtc
++# (dmsh_rtc.m: one process for the whole build, compiling as many shaders at once as the Mac has cores), with the offline compile's options (-O1, -fwrapv, the bracket depth,
++# invariance, no value names). Its libraries are rewritten here into the layout Xcode's metallib tool writes (canonical), so the host, dmsh_side.cut and the library image take them
++# as they take an Xcode build's.
++# The code is the same as an Xcode build's within the compilers' versions: Ocarina of Time's shaders (432 spread over the 42,848) compiled to the same LLVM code as Xcode 27.1's, but for
++# the order of a few loads around a discard where the compilers' versions differ (macOS 26.7's front end is metalfe-32023.886, Xcode 27.1's 32023.921), and to the same functions,
++# function types and vertex attributes. What differs in the run-time compiler's own file: each function's reflection (RFLT, and the HDYN, RLST and UUID blocks of the extended header
++# with their data after the code), and the metadata entries' sizes, which count their own size field. canonical drops the first and rewrites the second; Metal reads both forms.
++# The libraries are as deterministic as the offline compile's (a source compiles to the same bytes; dmsh_mtlcache.py keys its compile cache by the source), and the compiler's identity
++# (compiler_id: macOS's version and build and the front end's version) keys the caches, so a macOS update compiles again what it would compile differently.
++# Not part of the chain version, as dmsh_pch.py and dmsh_mtlcache.py: it changes no shader's MSL, and the libraries' cache keys carry RECORD and the compiler's identity.
++# Environment: DMSH_METAL=runtime selects it (dmsh_build.py, dmsh_mtlcache.py, tool_lock.py, the NSP script's --no-xcode), DMSH_RTC=the tool (default dmsh_rtc_bin/dmsh_rtc beside this file,
++# built by dmsh_rtc.sh), DMSH_RTC_JOBS=compiles at once (default: the cores)
++# Usage: dmsh_rtc.py --version | --arch | --check      as the tool's
++#        dmsh_rtc.py <library> <out>                     rewrite a library the run-time compiler wrote into the offline layout (canonical)
++import itertools, os, re, struct, subprocess, sys, threading
++
++HERE = os.path.dirname(os.path.abspath(__file__))
++RUNTIME = os.environ.get('DMSH_METAL') == 'runtime'
++TOOL = os.environ.get('DMSH_RTC') or os.path.join(HERE, 'dmsh_rtc_bin', 'dmsh_rtc')
++ARGS = '-O1 -fwrapv -fbracket-depth 1024 -discard-value-names'   # dmsh_rtc.m ARGS
++RECORD = f'macOS run-time compiler: newLibraryWithSource, preserveInvariance, {ARGS}; serializeToURL, dmsh_rtc.canonical'   # in each library's reflection (chain_metal), as MAC_RECORD
++# The OoT Online blend helper's reference parameter (dmsh_pch.py _BLEND_REF): macOS 26.7's run-time compiler, like Xcode 27.1's, wants its address space written out
++_BLEND_REF = re.compile(rb'(void dm_blend\d+\()(main\w*_out& )')
++
++
++def _tool(*args):
++    r = subprocess.run([TOOL, *args], capture_output=True, text=True, errors='replace')
++    if r.returncode: raise OSError(f'{TOOL} {" ".join(args)}: {(r.stderr.strip() or r.stdout.strip() or f"exit code {r.returncode}").splitlines()[-1]}')
++    return r.stdout.strip()
++
++
++_ident = None
++def compiler_id():   # 'macOS 26.7.2 (25G332) Apple metal version 32023.886 (metalfe-32023.886.1)', once per process
++    global _ident
++    if _ident is None: _ident = _tool('--version')
++    return _ident
++
++
++def front_end():   # the front end's version as metal --version's first line names it (tool_lock.py, own_compilers.py): 'Apple metal version 32023.886 (metalfe-32023.886.1)'
++    m = re.search(r'Apple metal version .*', compiler_id())
++    return m[0] if m else compiler_id()
++
++
++def gpu_arch(): return _tool('--arch')   # applegpu_g17s
++def check(): _tool('--check')   # raises OSError with the reason when this Mac cannot compile and write a library
++
++
++class _Server:
++    """One dmsh_rtc --serve for the process: requests go in from any thread, each answer wakes the thread that asked"""
++    def __init__(self):
++        jobs = os.environ.get('DMSH_RTC_JOBS') or str(os.cpu_count() or 8)
++        self.p = subprocess.Popen([TOOL, '--serve', jobs], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, errors='replace', bufsize=1)
++        self.lock, self.wait, self.ids = threading.Lock(), {}, itertools.count()
++        threading.Thread(target=self._read, daemon=True).start()
++
++    def _read(self):
++        for line in self.p.stdout:
++            rid, _, rest = line.rstrip('\n').partition('\t')
++            with self.lock: slot = self.wait.pop(rid, None)
++            if slot: slot[1] = rest; slot[0].set()
++        with self.lock:   # the tool ended: every request still waiting fails
++            for slot in self.wait.values(): slot[1] = f'error\tthe compile tool stopped (exit code {self.p.wait()})'; slot[0].set()
++            self.wait.clear()
++
++    def ask(self, msl, lib):
++        rid, slot = str(next(self.ids)), [threading.Event(), None]
++        with self.lock:
++            if self.p.poll() is not None: return f'error\tthe compile tool stopped (exit code {self.p.returncode})'
++            self.wait[rid] = slot
++            self.p.stdin.write(f'{rid}\t{msl}\t{lib}\n'); self.p.stdin.flush()
++        slot[0].wait()
++        return slot[1]
++
++
++_server, _server_lock = None, threading.Lock()
++def compile(msl, lib):
++    """msl → the library lib, as dmsh_build.py's mac_compile: raises CalledProcessError when it does not compile (its messages on standard error, as the offline compile's)"""
++    global _server
++    with _server_lock:
++        if _server is None or _server.p.poll() is not None: _server = _Server()
++    with open(msl, 'rb') as f: src = f.read()
++    tmp = f'{lib}.rtc-{os.getpid()}-{threading.get_ident()}'
++    use = msl
++    if _BLEND_REF.search(src):
++        use = tmp + '.metal'
++        with open(use, 'wb') as f: f.write(_BLEND_REF.sub(rb'\1thread \2', src))
++    try:
++        status, _, why = _server.ask(use, tmp).partition('\t')
++        if status != 'ok':
++            print(f'{msl}: does not compile (macOS run-time compiler): {why}', file=sys.stderr, flush=True)
++            raise subprocess.CalledProcessError(1, [TOOL, '--serve'], stderr=why.encode())
++        with open(tmp, 'rb') as f: data = canonical(f.read())
++        part = lib + '.part'
++        with open(part, 'wb') as f: f.write(data)
++        os.replace(part, lib)
++    finally:
++        for p in (tmp, tmp + '.metal'):
++            try: os.unlink(p)
++            except FileNotFoundError: pass
++
++
++def _tags(b, p, end):   # a tag list (4-byte tag, 2-byte size, value) up to ENDT
++    out = []
++    while p + 4 <= end:
++        tag = b[p:p + 4]; p += 4
++        if tag == b'ENDT': return out, p
++        n = struct.unpack_from('<H', b, p)[0]; p += 2; out.append((tag, b[p:p + n])); p += n
++    raise ValueError('a tag list without its end')
++
++
++def canonical(lib):
++    """A library the run-time compiler wrote, in the offline layout: the function list without RFLT, an extended header of ENDT alone, metadata entries sized without their size field,
++    and nothing after the code. Raises ValueError on a file it does not know. A library already in that layout comes back unchanged"""
++    try:
++        if lib[:4] != b'MTLB' or struct.unpack_from('<Q', lib, 0x10)[0] != len(lib): raise ValueError('not a whole Metal library')
++        fo, fs, po, ps, qo, qs, bo, bs = struct.unpack_from('<QQQQQQQQ', lib, 0x18)
++        if fo != 0x58 or fo + 4 + fs > po or po + ps > qo or qo + qs > bo or bo + bs > len(lib): raise ValueError('sections out of order')   # fs: the list without its count
++        n = struct.unpack_from('<I', lib, fo)[0]; p = fo + 4; ents = []
++        for _ in range(n):
++            size = struct.unpack_from('<I', lib, p)[0]
++            tags, _ = _tags(lib, p + 4, p + size)
++            if not any(t == b'NAME' for t, _ in tags): raise ValueError('a function without a name')
++            body = b''.join(t + struct.pack('<H', len(v)) + v for t, v in tags if t != b'RFLT') + b'ENDT'
++            ents.append(struct.pack('<I', len(body) + 4) + body); p += size
++        if p != fo + 4 + fs: raise ValueError('the function list is not its section')
++        _tags(lib, p, po)   # the extended header (HDYN, RLST, UUID: ranges past the code), left out
++
++        def meta(o, s):   # [u32 size][tags ... ENDT] each: the size counting itself (the run-time compiler's) or not (metallib's)
++            out, q = bytearray(), o
++            while q < o + s:
++                size = struct.unpack_from('<I', lib, q)[0]
++                _, end = _tags(lib, q + 4, o + s)
++                if end - q not in (size, size + 4): raise ValueError('a metadata entry whose size is neither form')
++                out += struct.pack('<I', end - q - 4) + lib[q + 4:end]; q = end
++            return bytes(out)
++        pub, priv = meta(po, ps), meta(qo, qs)
++    except (struct.error, IndexError) as e: raise ValueError(f'an unreadable library ({e})') from e
++    listing = struct.pack('<I', n) + b''.join(ents)
++    npo = 0x58 + len(listing) + 4; nqo = npo + len(pub); nbo = nqo + len(priv)
++    head = bytearray(lib[:0x58])
++    struct.pack_into('<Q', head, 0x10, nbo + bs)
++    struct.pack_into('<QQQQQQQQ', head, 0x18, 0x58, len(listing) - 4, npo, len(pub), nqo, len(priv), nbo, bs)
++    return bytes(head) + listing + b'ENDT' + pub + priv + lib[bo:bo + bs]
++
++
++if __name__ == '__main__':
++    a = sys.argv[1:]
++    try:
++        if a in (['--version'], ['--arch']): print(_tool(*a))
++        elif a == ['--check']: check(); print('ok')
++        elif len(a) == 2:
++            with open(a[0], 'rb') as f: data = canonical(f.read())
++            with open(a[1], 'wb') as f: f.write(data)
++        else: sys.exit('usage: dmsh_rtc.py --version | --arch | --check | <library> <out>')
++    except (OSError, ValueError) as e: sys.exit(f'[RED] {e}')
+diff --git a/dm/gfx/tools/dmsh_rtc.sh b/dm/gfx/tools/dmsh_rtc.sh
+new file mode 100755
+index 00000000..df29e760
+--- /dev/null
++++ b/dm/gfx/tools/dmsh_rtc.sh
+@@ -0,0 +1,9 @@
++#!/bin/sh
++# Builds dmsh_rtc (dmsh_rtc.m: the shader libraries' Metal compile through macOS's run-time compiler, for a Mac without Xcode) into
++# dmsh_rtc_bin/dmsh_rtc, arm64, for the host's minimum macOS (dm/mac/min_os.mk). Needs Xcode or the Command Line Tools: it is built where
++# those are (a developer's Mac, CI) and shipped prebuilt to a Mac without them.
++set -e
++cd "$(dirname "$0")"
++min=$(sed -n 's/^MACOS_MIN := //p' ../../mac/min_os.mk)
++mkdir -p dmsh_rtc_bin
++xcrun clang -fobjc-arc -O2 -Wall -Wextra -arch arm64 "-mmacosx-version-min=$min" -framework Foundation -framework Metal dmsh_rtc.m -o dmsh_rtc_bin/dmsh_rtc
+diff --git a/dm/gfx/tools/own_compilers.py b/dm/gfx/tools/own_compilers.py
+index d0e967d4..999ba3ef 100644
+--- a/dm/gfx/tools/own_compilers.py
++++ b/dm/gfx/tools/own_compilers.py
+@@ -18,6 +18,9 @@ strict = tool_lock.check_tools
+ def allowed(): return os.environ.get(ALLOW) == '1'
+ 
+ def metal_version(sdk):   # as tool_lock.tools_now records it: the first line of metal --version, 'missing' without one
++    if os.environ.get('DMSH_METAL') == 'runtime':   # no Xcode: macOS's run-time compiler (dmsh_rtc.py), which the build takes as another compiler (DM_ALLOW_OTHER_METAL=1)
++        import dmsh_rtc
++        return dmsh_rtc.front_end() if sdk == 'macosx' else 'missing'
+     r = subprocess.run(['xcrun', '-sdk', sdk, 'metal', '--version'], capture_output=True, text=True)
+     return (r.stdout.splitlines() or ['missing'])[0]
+ 
+diff --git a/dm/gfx/tools/shader_split.py b/dm/gfx/tools/shader_split.py
+index 202c5da2..2bf898e3 100644
+--- a/dm/gfx/tools/shader_split.py
++++ b/dm/gfx/tools/shader_split.py
+@@ -1408,7 +1408,7 @@ def nlg4_unzs(d):
+         if d[p:p + 4] == ZSTD_MAGIC: n = zstd_frame_len(d, p); frames.append(d[p:p + n]); p += n
+         elif not d[p]: p += 1
+         else: red(f'not a zstd frame at {p:#x} ({d[p:p + 8].hex(" ")})')
+-    return subprocess.run(['zstd', '-d', '-c', '-q'], input=b''.join(frames), capture_output=True, check=True).stdout
++    return unzstd(b''.join(frames))
+ 
+ def nlg4_programs(idx):
+     """The shader table of a revision-4 index: 12-byte entries {u8 kind (1 code area, 2 control section), u16 type, u8 number, u32 length, u32 offset in its section}, four per shader
+@@ -2612,6 +2612,15 @@ def zs_dicts(romfs):
+     d = zstd_mod().decompress(open(p, 'rb').read())
+     return {struct.unpack_from('<I', m, 4)[0]: m for _, m in sarc_members(d, '/Pack/ZsDic.pack.zs') if m[:4] == bytes.fromhex('37a430ec')}
+ 
++def unzstd(d):
++    """zstd frames without a dictionary, decompressed as one stream, as the zstd command gives them (zstd -d -c -q): through Python's zstd module when it has one (compression.zstd
++    from 3.14, the backport before), else the command. A Mac without Homebrew has no zstd command (the OoT Online installer's Python is 3.14)"""
++    try: from compression import zstd
++    except ImportError:
++        try: from backports import zstd
++        except ImportError: return subprocess.run(['zstd', '-d', '-c', '-q'], input=d, capture_output=True, check=True).stdout
++    return zstd.decompress(d)
++
+ def zs_dict_id(d):
+     """The zstd dictionary a frame names (0: none)"""
+     fhd = d[4] if len(d) > 5 and d[:4] == ZSTD_MAGIC else 0
+@@ -2630,7 +2639,7 @@ def unzs(path):
+     frames that name one with that dictionary from ZDICTS"""
+     d = open(path, 'rb').read()
+     did = zs_dict_id(d)
+-    if not did: return subprocess.run(['zstd', '-d', '-c', '-q'], input=d, capture_output=True, check=True).stdout
++    if not did: return unzstd(d)
+     return unzs_dict(d, did, path)
+ 
+ def frame_size(f):
+diff --git a/dm/gfx/tools/tool_lock.py b/dm/gfx/tools/tool_lock.py
+index b715d218..fe3219d4 100755
+--- a/dm/gfx/tools/tool_lock.py
++++ b/dm/gfx/tools/tool_lock.py
+@@ -18,6 +18,10 @@ def tools_now():
+     sc = shutil.which(SPIRV_CROSS)
+     t['spirv-cross'] = sha16(sc) if sc else 'missing'
+     for sdk in ('macosx', 'iphoneos'):
++        if os.environ.get('DMSH_METAL') == 'runtime':   # no Xcode (dmsh_rtc.py): macOS's run-time compiler for the Mac, none for iOS, and xcrun not run
++            import dmsh_rtc
++            t['metal_' + sdk] = dmsh_rtc.front_end() if sdk == 'macosx' else 'missing'
++            continue
+         t['metal_' + sdk] = subprocess.run(['xcrun', '-sdk', sdk, 'metal', '--version'], capture_output=True, text=True).stdout.splitlines()[0:1] or ['missing']
+         t['metal_' + sdk] = t['metal_' + sdk][0]
+     return t
+diff --git a/dm/mac/pack_app.py b/dm/mac/pack_app.py
+index 64a7dcff..ad61e581 100755
+--- a/dm/mac/pack_app.py
++++ b/dm/mac/pack_app.py
+@@ -12,7 +12,7 @@
+ # file's extended attributes live in such a file beside it, and codesign reads each one as a code object that is not signed, which fails the whole bundle.
+ # Usage: pack_app.py <out.app> --host <dmhost> --patched <dir> --romfs <image or dir> --msl <dir> --tables <profile dir> --font <dir> --title-id <id> --name <name> [options]
+ #   Reuses <out.app> while <out.app>.key matches; otherwise writes <out.app>.partial and swaps it in at the end. Prints "step: ..." and "app: <path>[, reused (inputs unchanged)]".
+-import argparse, ctypes, errno, hashlib, json, os, plistlib, re, shutil, stat, subprocess, sys, tempfile
++import argparse, ctypes, errno, hashlib, json, os, plistlib, re, shutil, stat, struct, subprocess, sys, tempfile
+ from pathlib import Path
+ 
+ HERE = Path(__file__).resolve().parent
+@@ -82,9 +82,22 @@ def copy(srcs, dst, clone):   # cp -R of each source to dst (a new path for one
+     if batch: run(cmd + batch + [dst])
+ 
+ 
+-def min_os(host):   # the host's deployment target (LC_BUILD_VERSION minos): the launcher is built for the same and Info.plist says it
+-    m = re.search(r'cmd LC_BUILD_VERSION.*?minos (\S+)', run(['otool', '-l', host]), re.S)
+-    return m.group(1) if m else '14.0'
++def min_os(host):   # the host's deployment target (LC_BUILD_VERSION minos): the launcher is built for the same and Info.plist says it. Read here, not with otool, which only Xcode or
++    # the Command Line Tools have (a Mac without them offers to install them instead): a thin arm64 executable, or the arm64 slice of a universal one; '26.6' as otool prints it
++    b = Path(host).read_bytes()
++    if b[:4] == b'\xca\xfe\xba\xbe':   # a universal binary (big-endian fat header): its arm64 slice
++        for i in range(struct.unpack_from('>I', b, 4)[0]):
++            cpu, _, off, size, _ = struct.unpack_from('>iiIII', b, 8 + 20 * i)
++            if cpu == 0x0100000c: b = b[off:off + size]; break
++    if b[:4] != b'\xcf\xfa\xed\xfe': return '14.0'
++    ncmds, p = struct.unpack_from('<I', b, 16)[0], 32
++    for _ in range(ncmds):
++        cmd, size = struct.unpack_from('<II', b, p)
++        if cmd == 0x32:   # LC_BUILD_VERSION: platform, minos as xxxx.yy.zz in nibbles
++            v = struct.unpack_from('<I', b, p + 12)[0]; major, minor, patch = v >> 16, v >> 8 & 0xff, v & 0xff
++            return f'{major}.{minor}' + (f'.{patch}' if patch else '')
++        p += size
++    return '14.0'
+ 
+ 
+ def swift_sources():   # the settings window, with the iOS launcher's model and rows
+@@ -136,6 +149,8 @@ def info_plist(a, minos, icon):
+ 
+ def source_commit():   # DMCommit: the checkout that packed the app (scripts/bug_report.py reads it), short hash, +dirty with uncommitted changes to tracked files; None outside a checkout
+     repo = HERE.parent.parent
++    if os.environ.get('DM_SOURCE_COMMIT'): return os.environ['DM_SOURCE_COMMIT']   # a source tree without its git folder says which commit it is (the OoT Online installer)
++    if not (repo / '.git').exists(): return None   # git is not run outside a checkout: without Xcode or the Command Line Tools /usr/bin/git offers to install them
+     try:
+         head = subprocess.run(['git', '-C', repo, 'rev-parse', '--short=12', 'HEAD'], capture_output=True, text=True, check=True).stdout.strip()
+         dirty = subprocess.run(['git', '-C', repo, 'status', '--porcelain', '--untracked-files=no'], capture_output=True, text=True, check=True).stdout.strip()
+@@ -269,7 +284,7 @@ def pack(a):
+     except (OSError, ValueError): previous = None
+     try:
+         a = argparse.Namespace(**vars(a))
+-        for name in ('out', 'host', 'patched', 'romfs', 'msl', 'tables', 'font', 'aoc', 'pso', 'pso_pairs', 'env_file', 'settings', 'icon', 'html'):
++        for name in ('out', 'host', 'launcher', 'patched', 'romfs', 'msl', 'tables', 'font', 'aoc', 'pso', 'pso_pairs', 'env_file', 'settings', 'icon', 'html'):
+             if getattr(a, name): setattr(a, name, str(Path(getattr(a, name)).resolve()))
+         mods, msls, pso, tables, pairs, fonts, files = selected_inputs(a)
+         # --program: the other programs of a game of several programs (index, rewritten modules, RomFS, shader libraries, tables, offline pages; tab-separated), which go in beside the first's as one app
+@@ -279,10 +294,12 @@ def pack(a):
+             pa = argparse.Namespace(**{**vars(a), 'patched': patched, 'romfs': prom, 'msl': pmsl, 'tables': ptab, 'pso': None, 'pso_pairs': None, 'aoc': None, 'marker': None})
+             pmods, pmsls, _, ptables, _, _, pfiles = selected_inputs(pa)
+             programs.append((n, Path(prom), Path(pmsl), Path(phtml), pmods, pmsls, ptables)); files += pfiles
+-        clang = Path(run(['xcrun', '--find', 'clang']).strip()).resolve()
+-        swiftc = Path(run(['xcrun', '--find', 'swiftc']).strip())   # not resolved: the driver is a link to swift-frontend, which acts by its name
+-        sdk = Path(run(['xcrun', '--sdk', 'macosx', '--show-sdk-path']).strip()).resolve()
+-        if not clang.is_file() or not swiftc.is_file() or not sdk.is_dir(): raise SystemExit(f'no compiler or SDK at {clang}, {swiftc}, {sdk}')
++        if a.launcher: clang = swiftc = sdk = None   # a launcher built elsewhere (--launcher): no compiler here
++        else:
++            clang = Path(run(['xcrun', '--find', 'clang']).strip()).resolve()
++            swiftc = Path(run(['xcrun', '--find', 'swiftc']).strip())   # not resolved: the driver is a link to swift-frontend, which acts by its name
++            sdk = Path(run(['xcrun', '--sdk', 'macosx', '--show-sdk-path']).strip()).resolve()
++            if not clang.is_file() or not swiftc.is_file() or not sdk.is_dir(): raise SystemExit(f'no compiler or SDK at {clang}, {swiftc}, {sdk}')
+         codesign = shutil.which('codesign')
+         if not codesign: raise SystemExit('codesign is not available')
+         codesign = Path(codesign).resolve()
+@@ -290,9 +307,9 @@ def pack(a):
+         sources = [Path(__file__).resolve(), HERE / 'launcher.c', HERE.parent / 'host/romfs_image.h', HERE.parent / 'host/save_sync.c', HERE.parent / 'host/save_sync.h', HERE.parent / 'tools/romfs.py'] + swift_sources()
+         inputs = {'options': vars(a), 'files': [(str(p), p.stat().st_mode, digest(p), os.readlink(p) if p.is_symlink() else None) for p in files + sources],
+                   'trees': [(p, inventory(Path(p))) for p in (a.romfs, a.aoc, a.html, *(str(x[1]) for x in programs), *(str(x[3]) for x in programs)) if p and Path(p).exists()],
+-                  'tools': [[str(c), c.stat().st_mode, c.stat().st_size, c.stat().st_mtime_ns, c.stat().st_ctime_ns, run([c, '--version']).strip()] for c in (clang, swiftc)] + [
+-                            str(sdk), run(['xcrun', '--sdk', 'macosx', '--show-sdk-version']).strip(),
+-                            str(codesign), codesign.stat().st_mode, digest(codesign), minos]}
++                  'tools': ([[a.launcher, digest(Path(a.launcher))]] if a.launcher else
++                            [[str(c), c.stat().st_mode, c.stat().st_size, c.stat().st_mtime_ns, c.stat().st_ctime_ns, run([c, '--version']).strip()] for c in (clang, swiftc)] + [
++                            str(sdk), run(['xcrun', '--sdk', 'macosx', '--show-sdk-version']).strip()]) + [str(codesign), codesign.stat().st_mode, digest(codesign), minos]}
+         key = hashlib.sha256(json.dumps(inputs, sort_keys=True).encode()).hexdigest()
+         if out.is_dir() and isinstance(previous, dict) and previous.get('inputs') == key and previous.get('app') == inventory(out):
+             print(f'app: {out}, reused (inputs unchanged)', flush=True)
+@@ -315,7 +332,8 @@ def pack(a):
+         free = shutil.disk_usage(res).free
+         if need + (1 << 30) > free: raise SystemExit(f'the app needs {need / 2**30:.1f} GB on the volume of {out.parent} (no APFS clones from the build there) and {free / 2**30:.1f} GB are free')
+     step(f'launcher and host ({"clones" if clone["romfs"] else "copies"} of the game files)')
+-    build_launcher(mac / EXE, minos, clang, swiftc, sdk)
++    if a.launcher: shutil.copyfile(a.launcher, mac / EXE); os.chmod(mac / EXE, 0o755)   # built for the host's minimum macOS where it was built (dm/mac/prebuild.py)
++    else: build_launcher(mac / EXE, minos, clang, swiftc, sdk)
+     shutil.copy(a.host, mac / 'dmhost')   # data and mode, not the build's extended attributes (copy2 would carry them into the app)
+     copy(mods, dm, clone['mods'])
+     if tables: copy(tables, dm, False)
+@@ -370,6 +388,7 @@ def parse(argv):
+     ap = argparse.ArgumentParser(prog='pack_app.py', description='Pack a self-contained Mac app of a game')
+     ap.add_argument('out', help='the app (<name>.app)')
+     ap.add_argument('--host', required=True, help='the Mac host built for the profile')
++    ap.add_argument('--launcher', help='the launcher, built elsewhere for the host\'s minimum macOS (dm/mac/prebuild.py), for a Mac without a compiler (default: built here with Xcode\'s clang and swiftc)')
+     ap.add_argument('--patched', required=True, help='the rewritten modules (patch_nso.py output)')
+     ap.add_argument('--romfs', required=True, help='the RomFS of the packed version')
+     ap.add_argument('--msl', required=True, help='the Mac shader libraries: <shader>/cache/b-<chain>, or a Vulkan or GL game\'s <shader>/vk or gl')
+diff --git a/dm/mac/prebuild.py b/dm/mac/prebuild.py
+new file mode 100644
+index 00000000..c130d192
+--- /dev/null
++++ b/dm/mac/prebuild.py
+@@ -0,0 +1,44 @@
++#!/usr/bin/env python3
++# The native parts of a Mac app, built here (Xcode or the Command Line Tools) for a Mac that has neither: the Mac host for a game profile, the app's launcher and dmsh_rtc (the shaders'
++# Metal compile through macOS's run-time compiler, dm/gfx/tools/dmsh_rtc.m). The NSP script's --no-xcode takes the folder this writes (--prebuilt), checks the host against the profile and the
++# chain version it packs (build_ipa_from_nsp.py prebuilt_manifest, prebuilt_host) and packs these instead of compiling them. manifest.json records what they were built from: the profile's
++# game_profile.h, the chain version, the minimum macOS, the commit, and each file's sha256. Nothing in it comes from a game's files: the profile is the repository's.
++# Usage: prebuild.py <game title ID> <out folder>     (run from a checkout; the chain header is rewritten first when the tree's chain files changed: dmsh_chain.py --header)
++import hashlib, json, os, shutil, subprocess, sys, tempfile
++from pathlib import Path
++
++HERE = Path(__file__).resolve().parent; REPO = HERE.parents[1]
++sys.path.insert(0, str(HERE)); import pack_app
++
++
++def sha(p): return hashlib.sha256(Path(p).read_bytes()).hexdigest()
++
++
++def main(game, out):
++    out = Path(out).resolve(); out.mkdir(parents=True, exist_ok=True)
++    py = sys.executable
++    subprocess.run([py, REPO / 'dm/gfx/tools/dmsh_chain.py', '--header'], check=True)
++    chain = subprocess.run([py, REPO / 'dm/gfx/tools/dmsh_chain.py'], check=True, capture_output=True, text=True).stdout.strip()
++    host = REPO / 'dm/host'
++    subprocess.run(['make', '-s', f'GAME={game}', f'gen/{game}/game_profile.h', 'gen/vpx/libvpx.a', 'gen/dav1d/libdav1d.a', 'host_msl'], cwd=host, check=True)
++    subprocess.run(['make', '-s', f'GAME={game}', 'dmhost'], cwd=host, check=True)
++    shutil.copyfile(host / 'dmhost', out / 'dmhost'); os.chmod(out / 'dmhost', 0o755)
++    minos = pack_app.min_os(out / 'dmhost')
++    xcrun = lambda *a: subprocess.run(['xcrun', *a], check=True, capture_output=True, text=True).stdout.strip()
++    with tempfile.TemporaryDirectory() as t:   # build_launcher works inside the app it builds for (its temporary folder beside the app)
++        exe = Path(t) / 'launcher.app/Contents/MacOS/launcher'; exe.parent.mkdir(parents=True)
++        pack_app.build_launcher(exe, minos, Path(xcrun('--find', 'clang')).resolve(), Path(xcrun('--find', 'swiftc')), Path(xcrun('--sdk', 'macosx', '--show-sdk-path')).resolve())
++        shutil.copyfile(exe, out / 'launcher'); os.chmod(out / 'launcher', 0o755)
++    subprocess.run(['sh', REPO / 'dm/gfx/tools/dmsh_rtc.sh'], check=True)
++    shutil.copyfile(REPO / 'dm/gfx/tools/dmsh_rtc_bin/dmsh_rtc', out / 'dmsh_rtc'); os.chmod(out / 'dmsh_rtc', 0o755)
++    commit = os.environ.get('DM_SOURCE_COMMIT') or subprocess.run(['git', '-C', REPO, 'rev-parse', '--short=12', 'HEAD'], capture_output=True, text=True).stdout.strip() or None
++    files = ('dmhost', 'launcher', 'dmsh_rtc')
++    manifest = {'format': 1, 'game': game, 'chain': chain, 'minos': minos, 'commit': commit, 'profile_header': (host / f'gen/{game}/game_profile.h').read_text(),
++                'files': {f: sha(out / f) for f in files}, 'sdk': xcrun('--sdk', 'macosx', '--show-sdk-version'), 'clang': xcrun('clang', '--version').splitlines()[0]}
++    (out / 'manifest.json').write_text(json.dumps(manifest, indent=1) + '\n')
++    print(f'prebuilt for {game}, chain {chain}, macOS {minos}+: {out}')
++
++
++if __name__ == '__main__':
++    if len(sys.argv) != 3: sys.exit('usage: prebuild.py <game title ID> <out folder>')
++    main(*sys.argv[1:])
+diff --git a/scripts/build_ipa_from_nsp.py b/scripts/build_ipa_from_nsp.py
+index 1c2a61ff..afcdebed 100755
+--- a/scripts/build_ipa_from_nsp.py
++++ b/scripts/build_ipa_from_nsp.py
+@@ -84,6 +84,10 @@ PROGRAM_INDEX = 0                       # a multi-program application (Super Mar
+ ALLOW_DAMAGED = False                   # a damaged NSP (files failing the NCA's hash check: an incomplete copy or a broken download), or files whose bytes do not start as their names promise (a .zs that is no zstd stream: a NUP or a dump has no hashes), stop the build; True writes those files as read and goes on
+ ALLOW_SHADER_REGRESSIONS = False        # shaders that translated in this game's previous build and fail with the current translation chain stop the build (logs/shader_regressions.log lists them);
+                                         #   True packs the app without them
++NO_XCODE = False                        # PLATFORM 'mac' / 'mac-app' on a Mac without Xcode and the Command Line Tools: the shaders through macOS's own run-time compiler (dm/gfx/tools/dmsh_rtc.py, which takes
++                                        #   them as another Metal compiler: ALLOW_OTHER_METAL), the Mac host and the app's launcher prebuilt (PREBUILT), no pipeline archive made offline (metal-tt is Xcode's:
++                                        #   the app builds its pipeline bases on its first start), and no xcrun, make, git, otool or zstd command run (without the Command Line Tools /usr/bin's offer to install them)
++PREBUILT = ''                           # NO_XCODE: the folder dm/mac/prebuild.py wrote (dmhost, launcher, dmsh_rtc, manifest.json); empty = <repository>/prebuilt
+ ALLOW_OTHER_METAL = False               # an NVN game's shaders are built only with the Metal compiler they were tested with (dm/gfx/tools/dmsh_chain.lock: Xcode 27.2); another one stops the build,
+                                         #   as its shaders can render wrong pictures (GitHub issue #242). True builds them with this Mac's Metal compiler anyway
+ PROVISIONAL = False                     # build from a provisional profile even when dm/games has one for the game (to test the guesses; the profile goes to PROFILE_OUT / <build folder>/profile)
+@@ -97,6 +101,7 @@ SWITCH_ALIAS = 0x1000000000             # the Switch's alias region (64 GB), whi
+ PROGRESS = 'auto'                       # stage lines on the console: 'bar' (one line per stage, redrawn in place), 'lines' (a plain line every BEAT seconds), 'off' (only each stage's start and end); 'auto' = bar in a terminal or Spyder, lines when the output goes to a file; 'json' = one JSON event per line, for a program that shows the build
+ BEAT = 30                               # seconds between progress lines in 'lines' mode
+ TOOL_PATHS = ['/opt/homebrew/bin', '/usr/local/bin']   # searched after the caller's PATH (tool_env): GUI apps such as Spyder do not get the shell's PATH
++PREBUILT_SET = None                     # NO_XCODE: the prebuilt folder's manifest, with the paths of its files (prebuilt_manifest)
+ 
+ 
+ class BuildError(Exception):
+@@ -1150,6 +1155,16 @@ def check_prereqs(env, xlate, mac=False):   # mac: a Mac-only build (PLATFORM 'm
+     missing = [m for m in ('lz4.block', 'capstone', 'fontTools', 'zbic') if not _importable(m)] + ([] if _importable('compression.zstd') or _importable('backports.zstd') else ['backports.zstd'])   # zstd: built in from Python 3.14. zbic: a system 22.0.0+ module's segments, which only the rewrite reads, after the whole game is unpacked
+     if missing: raise BuildError(f'the current Python ({sys.executable}) is missing modules: {", ".join(missing)} (pip install lz4 "capstone>=5,<6" fonttools zbic backports.zstd; backports.zstd only before Python 3.14)')
+     check_capstone()
++    if PREBUILT_SET:   # no Xcode: macOS's run-time compiler and the prebuilt host and launcher stand for Xcode, make, xcodegen and the Metal compiler; zstd is Python's; the translator and spirv-cross as always
++        import dmsh_rtc
++        try: dmsh_rtc.check()
++        except OSError as e: raise BuildError(f'this Mac cannot compile the shaders without Xcode: {e}') from e
++        check_rosetta(env)
++        if not xlate.exists(): raise BuildError(f'the shader translator is missing from the repository: {xlate}')
++        check_translator(xlate, env)
++        sc = env.get('SPIRV_CROSS', str(xlate.parent.parent / 'spirv_cross_bin/spirv-cross'))
++        if not shutil.which(sc, path=env.get('PATH')): raise BuildError(f'spirv-cross is missing or not executable: {sc}')
++        return
+     tools = {'xcodebuild': 'Xcode', 'xcodegen': 'brew install xcodegen', 'zstd': 'brew install zstd', 'make': 'Xcode', 'glslangValidator': 'brew install glslang'}   # glslang: an OpenGL game's shaders, checked before its capture
+     if mac: del tools['xcodegen']
+     gone = [f'{t} ({how})' for t, how in tools.items() if not shutil.which(t, path=env['PATH'])]
+@@ -1163,6 +1178,13 @@ def check_prereqs(env, xlate, mac=False):   # mac: a Mac-only build (PLATFORM 'm
+     if not shutil.which(sc, path=env.get('PATH')): raise BuildError(f'spirv-cross is missing or not executable: {sc}')
+ 
+ 
++def check_rosetta(env):
++    """On macOS 26 the translator runs as Intel code (dmsh_chain.py xlate_cmd: its arm64 half needs macOS 27), which needs Rosetta: said before the extraction, as the build would stop at the shader step"""
++    if not any(x == 'arch' for x in __import__('dmsh_chain').xlate_cmd('x')): return
++    if subprocess.run(['arch', '-x86_64', '/usr/bin/true'], capture_output=True, env=env).returncode == 0: return
++    raise BuildError('the shader translator runs as Intel code on macOS 26, and Rosetta is not installed: install it (softwareupdate --install-rosetta --agree-to-license, or open any Intel app and accept), or update to macOS 27')
++
++
+ def check_ios_sdk(env):   # the iOS platform is a separate download in Xcode's Components; xcodebuild, the Metal toolchain and the macOS SDK can be there without it
+     if subprocess.run(['xcrun', '--sdk', 'iphoneos', '--show-sdk-version'], capture_output=True, text=True, env=env).returncode == 0: return
+     dev = subprocess.run(['xcode-select', '-p'], capture_output=True, text=True, env=env).stdout.strip()
+@@ -1538,11 +1560,46 @@ def decoder_host_key(host):
+     return None
+ 
+ 
++def prebuilt_manifest(d):
++    """NO_XCODE: the folder dm/mac/prebuild.py wrote, checked: its manifest.json (format 1) with the paths of dmhost, launcher and dmsh_rtc, each file whole (its sha256 the manifest's)"""
++    try: m = json.loads((d / 'manifest.json').read_text())
++    except (OSError, ValueError) as e: raise BuildError(f'--no-xcode needs the prebuilt Mac host and launcher (dm/mac/prebuild.py writes them): no manifest in {d} ({e})') from e
++    if m.get('format') != 1: raise BuildError(f'{d / "manifest.json"}: format {m.get("format")}, not 1')
++    for f, digest in m.get('files', {}).items():
++        p = d / f
++        try: ok = hashlib.sha256(p.read_bytes()).hexdigest() == digest
++        except OSError: ok = False
++        if not ok: raise BuildError(f'the prebuilt {f} is missing or damaged: {p} is not the file its manifest names')
++        m[f] = p
++    return m
++
++
++PREBUILT_ROWS = ('#define DM_GAME_BUILD_MODULES ', '#define DM_GAME_DISPLAY_VERSIONS ')   # a derived profile adds its own build row: these two read it (main.c profile_modules, hle_sdk16.c DisplayVersion)
++
++
++def prebuilt_host(repo, out, g):
++    """NO_XCODE: the prebuilt host (prebuilt_manifest) in place of build_mac_host, when it was built for this profile and chain: its game_profile.h the profile's (game.py header), but for the build rows a
++    derived profile adds for its version (PREBUILT_ROWS: an unknown build loads the profile's modules and reports display version 1.0.0), and its chain version this tree's (dmsh_chain.h)"""
++    m = PREBUILT_SET
++    import game as gamemod
++    lines = lambda t: [l for l in t.splitlines() if not l.startswith(('//',) + PREBUILT_ROWS)]
++    if m.get('game') != g.id: raise BuildError(f'the prebuilt Mac host is for game {m.get("game")}, not {g.id}: a Mac without Xcode packs only the games it was prebuilt for')
++    if lines(m['profile_header']) != lines(gamemod.header(g)):
++        diff = sorted(set(lines(gamemod.header(g))) ^ set(lines(m['profile_header'])))
++        raise BuildError(f'the prebuilt Mac host was built from another game profile than {g.dir}: {"; ".join(diff[:4])} (a derived profile that changes the host needs a host built for it, with Xcode)')
++    if m.get('chain') != chain_of(repo): raise BuildError(f'the prebuilt Mac host loads shader chain {m.get("chain")}, this tree builds {chain_of(repo)}: prebuild it again from this tree (dm/mac/prebuild.py)')
++    out.parent.mkdir(parents=True, exist_ok=True)
++    if not (out.is_file() and hashlib.sha256(out.read_bytes()).hexdigest() == m['files']['dmhost']):
++        tmp = out.with_name(out.name + '.part'); shutil.copyfile(m['dmhost'], tmp); os.chmod(tmp, 0o755); os.replace(tmp, out)
++    return out
++
++
+ def build_mac_host(repo, out, env, logs, g):
+     """The Mac host for the profile, built into out: dm/host's own compile line (make -n) with the output moved, since make takes no target path with spaces and dm/host/dmhost may be another build's.
+     Reused when the compile line and its inputs (the source files of HOST_DIRS, the chain header dm/gfx/nvn/dmsh_chain.h among them, the profile header make generates, libvpx, dav1d and the third-party headers, the compiler
+     and the macOS SDK) are as at the last build into out. The host runs the game's own arm64 code natively, so an Intel Mac stops here (GitHub issue #54)"""
+     if not apple_silicon(): raise BuildError('this step boots the game in the Mac host, which runs the game\'s own arm64 code natively: it needs a Mac with Apple silicon, and this Mac has an Intel processor')
++    if PREBUILT_SET: return prebuilt_host(repo, out, g)
+     host = repo / 'dm/host'
+     run(['make', '-s', f'GAME={g.id}', f'gen/{g.id}/game_profile.h', 'gen/vpx/libvpx.a', 'gen/dav1d/libdav1d.a', 'host_msl'], logs / 'mac_host_make.log', env=env, cwd=host)
+     dry = subprocess.run(['make', '-n', '-B', f'GAME={g.id}', 'dmhost'], env=env, cwd=host, capture_output=True, text=True)
+@@ -2283,6 +2340,9 @@ def spirv_cross(repo, env=None):   # resolve the same selection the shader tools
+ 
+ 
+ def toolchain(repo, env=None):   # Metal is a separate Xcode download: its version and SDK must invalidate reuse too
++    if PREBUILT_SET:   # no Xcode: macOS's run-time compiler, whose identity names macOS's version and build (dmsh_rtc.py)
++        import dmsh_rtc
++        return (('files', [spirv_cross(repo, env)]), 'metal runtime ' + dmsh_rtc.compiler_id())
+     return (('cmd', ['xcodebuild', '-version']), ('files', [spirv_cross(repo, env)]),
+             *(('cmd', ['xcrun', '-sdk', sdk, *args]) for sdk in ('macosx', 'iphoneos')
+               for args in (['metal', '--version'], ['metallib', '--version'], ['--show-sdk-version'], ['--show-sdk-build-version'])))
+@@ -2692,6 +2752,10 @@ int main(void) { @autoreleasepool { id<MTLDevice> d = MTLCreateSystemDefaultDevi
+ 
+ def mac_gpu_arch(work, env, logs):
+     """This Mac's GPU architecture as Metal names it (MTLDevice.architecture, e.g. applegpu_g14s for an M2 Max): the archive file the host opens in an app's pso/ (pso_bundle_open)"""
++    if PREBUILT_SET:   # no compiler for the probe: the prebuilt dmsh_rtc asks Metal the same
++        import dmsh_rtc
++        try: return dmsh_rtc.gpu_arch()
++        except OSError as e: raise BuildError(f'cannot tell this Mac\'s GPU architecture ({e})') from e
+     src, exe = work / 'tools/mtl_arch.m', work / 'tools/mtl_arch'
+     if not (exe.is_file() and src.is_file() and src.read_text() == MTL_ARCH_M):
+         src.parent.mkdir(parents=True, exist_ok=True); src.write_text(MTL_ARCH_M)
+@@ -2708,6 +2772,7 @@ def mac_pso(py, repo, work, lib, g, gpus, env, logs):
+     and the bases (about 615 MB for Breath of the Wild) do not go into the player's ~/Library/Application Support. gpus: --gpu / PSO_GPUS (empty: this Mac's GPU; none: no archive, the app
+     builds the bases on its first start). Made again only when its inputs change (pso_offline.py's key). Returns the folder, or None"""
+     if gpus == 'none': say('pipeline archive: none (--gpu none): the app builds the pipeline bases on its first start'); return None
++    if PREBUILT_SET: say('pipeline archive: none without Xcode (its metal-tt makes it): the app builds the pipeline bases on its first start, or the host\'s prebuild (DM_PSO_PREBUILD=tool) before it'); return None
+     if gpus and not re.fullmatch(r'(applegpu_)?g\w+(,(applegpu_)?g\w+)*', gpus): raise BuildError(f'--gpu / PSO_GPUS takes GPU architectures such as g14s, or none: {gpus}')
+     try: here = mac_gpu_arch(work, env, logs)
+     except BuildError:
+@@ -2751,6 +2816,7 @@ def mac_app(py, repo, out, app, work, game, patched, host, font, msl, aoc, gfx,
+     cmd = [py, repo / 'dm/mac/pack_app.py', out, '--host', host, '--patched', patched, '--romfs', rfs.source(game), '--msl', lib, '--tables', g.table('shader_map.tsv').parent,
+            '--font', font, '--title-id', f'{app:016X}', '--name', name, '--bundle-id', bundle_id, '--lang', lang, '--sign', sign or '-']
+     split_pairs = work / 'shader/pso_pairs.tsv'   # the split's copy of pso_pairs.tsv, for a profile without the table (as mac_run's DM_PSO_PAIRS)
++    if PREBUILT_SET: cmd += ['--launcher', PREBUILT_SET['launcher']]   # no compiler here: the launcher prebuilt with the host
+     for opt, v in (('--version', version), ('--category', g.get('app_category')), ('--marker', g.get('romfs_marker')), ('--aoc', aoc), ('--icon', icon),
+                    ('--pso', pso), ('--pso-pairs', split_pairs if gfx == 'nvn' and not g.table('pso_pairs.tsv').is_file() and split_pairs.is_file() else None),
+                    ('--env-file', Path(os.path.expanduser(env_file)).resolve() if env_file else None), ('--settings', settings)):
+@@ -2817,6 +2883,9 @@ def parse_args(argv):
+                     'pack the app without them instead of stopping')
+     ap.add_argument('--allow-other-metal', action='store_true', help='an NVN game: build its shaders with this Mac\'s Metal compiler when it is not the one they were tested with '
+                     '(dm/gfx/tools/dmsh_chain.lock, Xcode 27.2) instead of stopping; such shaders can render wrong pictures')
++    ap.add_argument('--no-xcode', action='store_true', help='--platform mac or mac-app on a Mac without Xcode: shaders through macOS\'s run-time compiler, the Mac host and launcher prebuilt (--prebuilt), '
++                    'no pipeline archive made offline (the app builds its bases on its first start) (default: the NO_XCODE setting)')
++    ap.add_argument('--prebuilt', help='--no-xcode: the folder dm/mac/prebuild.py wrote (default: the PREBUILT setting, else <repository>/prebuilt)')
+     ap.add_argument('--profile-out', help='where the provisional profile goes (default: <build folder>/profile: <NSP folder>/<title ID>_build/profile, or under --work-dir)')
+     ap.add_argument('--provisional', action='store_true', help='build from a provisional profile even when dm/games has one for the game (tests the guesses)')
+     ap.add_argument('--no-heap-check', action='store_true', help='a provisional profile: skip the heap check and the address region check on the Mac (the alias / heap split stays a guess); a derived profile: skip the address region check')
+@@ -2920,6 +2989,14 @@ def main(args=None):
+     if mac and prepare_xcode: raise BuildError(f'--prepare-xcode makes an iPhone project: it cannot be combined with --platform {platform}')
+     if mac and not apple_silicon(): raise BuildError(f'--platform {platform} runs the game in the Mac host, which runs the game\'s own arm64 code natively: it needs a Mac with Apple silicon, and this Mac has an Intel processor')
+     check_native_python()
++    global PREBUILT_SET   # (ALLOW_OTHER_METAL is global in main already)
++    if args.no_xcode or NO_XCODE:   # no Xcode (NO_XCODE): everything a compiler would make comes from the prebuilt folder, the shaders from macOS's run-time compiler
++        if not mac: raise BuildError('--no-xcode builds for the Mac only (--platform mac or mac-app): an iPhone build needs Xcode')
++        PREBUILT_SET = prebuilt_manifest(Path(os.path.expanduser(args.prebuilt or PREBUILT)).resolve() if (args.prebuilt or PREBUILT) else repo / 'prebuilt')
++        os.environ['DMSH_METAL'] = 'runtime'; os.environ['DMSH_RTC'] = str(PREBUILT_SET['dmsh_rtc'])   # dmsh_build.py, own_compilers.py, tool_lock.py, dmsh_mtlcache.py (dmsh_rtc.py)
++        sys.path.insert(0, str(repo / 'dm/gfx/tools'))
++        ALLOW_OTHER_METAL = True   # the run-time compiler is not the lock's (Xcode 27.2's): its note says which it is
++        say(f'without Xcode: the shaders through macOS\'s run-time compiler, the Mac host and launcher prebuilt (chain {PREBUILT_SET.get("chain")}, commit {PREBUILT_SET.get("commit")})')
+     keep = KEEP_EXTRACTED if args.keep_extracted is None else args.keep_extracted
+     if mac and not keep: say('keeping the extracted game files all the same: the game runs from them on the Mac' + (' and the app is made of clones of them' if mac_pack else '')); keep = True
+     if prepare_xcode and not keep: raise BuildError('--prepare-xcode requires --keep-extracted: Xcode builds from the extracted files')
+@@ -2946,7 +3023,7 @@ def main(args=None):
+     lang_in = args.language or LANGUAGE   # checked against the game's languages once its control data is extracted
+     want_lang = language_code(lang_in) if lang_in else 'en-US'
+     if not want_lang: raise BuildError(f'unknown game language {lang_in!r}; give one of {language_list([c for c, _ in nacp.LANGUAGES])}, by code or by name')
+-    env = tool_env()
++    env = tool_env() if not PREBUILT_SET else dict(os.environ, PATH=os.environ.get('PATH') or '/usr/bin:/bin:/usr/sbin:/sbin')   # without Xcode, nothing from Homebrew either
+     env.setdefault('USER', getpass.getuser())   # xcodegen fails without USER (Couldn't find current username)
+     env.setdefault('J', str(os.cpu_count() or 8))   # shader_split.py's and dmsh_build.py's workers (their default is 8)
+     py = sys.executable

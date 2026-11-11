@@ -1,5 +1,6 @@
 #!/bin/zsh
-# OoT Online installer for Macs with an Apple chip. In Terminal:
+# OoT Online's Terminal setup, for developers (it needs Xcode and Homebrew). Players: the installer app, no Terminal
+# (https://github.com/bhoneka/oot-online/releases/latest/download/Install-OoT-Online.zip). In Terminal:
 #   curl -fsSL https://bhoneka.github.io/oot-online/install.sh | zsh
 # It asks for YOUR OWN game file (a .nup of The Legend of Zelda: Ocarina of Time for Nintendo Switch 2), gets OoT Online's
 # code from GitHub, and builds "Ocarina of Time Online" into ~/Applications from your file (one to three hours the first

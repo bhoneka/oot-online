@@ -45,11 +45,9 @@ figcaption { padding: 10px 12px; font-size: 14px; color: var(--mute); }
 .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 20px 22px; }
 ul { margin: 0 0 14px; padding-left: 22px; }
 li { margin: 6px 0; }
-.cmd { display: flex; align-items: stretch; margin: 14px 0; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; background: var(--code); }
-.cmd code { flex: 1; padding: 14px 16px; font: 15px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--gold2); overflow-x: auto; white-space: nowrap; }
-.cmd button { border: 0; border-left: 1px solid var(--line); background: rgba(216,189,115,0.12); color: var(--gold2); font: 600 14px Inter, sans-serif;
-              padding: 0 18px; cursor: pointer; }
-.cmd button:hover { background: rgba(216,189,115,0.22); }
+.dl { margin: 18px 0 8px; }
+.steps { margin: 16px 0 14px; padding-left: 24px; }
+.steps li { margin: 8px 0; padding-left: 4px; }
 kbd { font: 600 13px ui-monospace, Menlo, monospace; padding: 2px 7px; border-radius: 5px; border: 1px solid var(--line); background: var(--code); color: var(--gold2); }
 .two { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
 .note { color: var(--mute); font-size: 14px; }
@@ -97,16 +95,24 @@ footer { border-top: 1px solid var(--line); margin-top: 48px; padding: 24px 20px
     <div class="card">
       <p><strong>You need your own copy of the game.</strong> OoT Online contains nothing from it and downloads nothing from it:
         it builds the game from your own dump (a <code>.nup</code> of Ocarina of Time from your own Switch 2), on your Mac.</p>
-      <ul>
-        <li>A Mac with an Apple chip (M1 or later), macOS 26.6 or later, about 60 GB free.</li>
-        <li>Xcode from the App Store, then once in Terminal: <code>xcodebuild -downloadComponent MetalToolchain</code></li>
-        <li><a href="https://brew.sh">Homebrew</a>.</li>
-      </ul>
-      <p>Then open Terminal and paste:</p>
-      <div class="cmd"><code id="install">curl -fsSL https://bhoneka.github.io/oot-online/install.sh | zsh</code><button id="copy" type="button">Copy</button></div>
-      <p class="note">It asks for your game file and builds <strong>Ocarina of Time Online</strong> into your Applications folder.
-        The first build takes one to three hours (it compiles about 43,000 shaders for your Mac) and happens once. Run the
-        same line again later to update; that takes minutes.</p>
+      <p>You need a Mac with an Apple chip (M1 or later), macOS 26.6 or later, and about 60 GB free. Nothing else: no Xcode, no
+        Homebrew, no Terminal.</p>
+      <div class="btns dl">
+        <a class="btn" id="download" href="https://github.com/bhoneka/oot-online/releases/latest/download/Install-OoT-Online.zip">Download the installer</a>
+        <span class="note" id="dlinfo">For Macs with an Apple chip, macOS 26.6 or later</span>
+      </div>
+      <ol class="steps">
+        <li>Open <strong>Install OoT Online</strong> from your Downloads (if your browser left it as a zip, double-click the zip first).</li>
+        <li>The first time, macOS says it cannot check the app for malicious software: it is a free fan project, not signed by
+          Apple. Click <strong>Done</strong>, then open <strong>System Settings → Privacy &amp; Security</strong>, scroll down,
+          click <strong>Open Anyway</strong> next to "Install OoT Online" and confirm. This happens once.</li>
+        <li>Click <strong>Choose your game file…</strong>, pick your <code>.nup</code>, then <strong>Build Ocarina of Time Online</strong>.</li>
+      </ol>
+      <p class="note">The installer builds <strong>Ocarina of Time Online</strong> into the Applications folder in your home
+        folder. The first build takes one to three hours (it translates and compiles about 43,000 of the game's shaders for your
+        Mac) and happens once; your Mac stays awake meanwhile. To update later, open the installer again: it reuses what it built
+        and takes minutes. On macOS 26 it may ask your password to install Rosetta, Apple's helper for Intel code, which one of its
+        tools needs.</p>
     </div>
   </section>
 
@@ -139,7 +145,7 @@ footer { border-top: 1px solid var(--line); margin-top: 48px; padding: 24px 20px
     <h2>Run your own server</h2>
     <p>The server is a single Node.js program with no dependencies. On a small Linux box: <code>zsh deploy/push.sh
       root@&lt;address&gt;</code> from the repository installs it as a service. Friends only: <code>--code SOMEWORD</code>.
-      Point the installer at it with <code>OOT_ONLINE_SERVER=&lt;address&gt;:4697</code>.
+      Point the installer at it: <strong>Options</strong>, then its address (<code>&lt;address&gt;:4697</code>).
       <a href="https://github.com/bhoneka/oot-online">Everything is on GitHub.</a></p>
   </section>
 </main>
@@ -150,12 +156,16 @@ footer { border-top: 1px solid var(--line); margin-top: 48px; padding: 24px 20px
 </footer>
 
 <script>
-document.getElementById('copy').addEventListener('click', async () => {
-  const b = document.getElementById('copy');
-  try { await navigator.clipboard.writeText(document.getElementById('install').textContent); b.textContent = 'Copied'; }
-  catch (e) { b.textContent = 'Select it'; }
-  setTimeout(() => { b.textContent = 'Copy'; }, 1800);
-});
+// The installer's version and size from the latest release (the button works without it)
+(async () => {
+  try {
+    const r = await (await fetch('https://api.github.com/repos/bhoneka/oot-online/releases/latest', { cache: 'no-store' })).json();
+    const a = (r.assets || []).find(x => x.name === 'Install-OoT-Online.zip');
+    if (!a) return;
+    const v = (r.tag_name || '').replace(/^installer-v/, '');
+    document.getElementById('dlinfo').textContent = 'Version ' + v + ', ' + Math.round(a.size / 1048576) + ' MB. For Macs with an Apple chip, macOS 26.6 or later';
+  } catch (e) {}
+})();
 // The public server's address (server.txt) and, when it has one, its HTTPS status (status.txt: a URL serving /api/state)
 (async () => {
   const s = document.getElementById('server'), d = document.getElementById('dot');

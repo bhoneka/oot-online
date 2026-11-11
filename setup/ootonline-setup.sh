@@ -1,5 +1,6 @@
 #!/bin/zsh
-# OoT Online setup: turns YOUR OWN Ocarina of Time (Switch 2) dump into a Mac app with OoT Online inside.
+# OoT Online setup for developers (Xcode and Homebrew): turns YOUR OWN Ocarina of Time (Switch 2) dump into a Mac app with OoT Online inside.
+# Players use the installer app instead (installer/, setup/install.py), which needs neither.
 #   zsh ootonline-setup.sh "/path/to/your game.nup" [server address]
 # What it does, in order (each step says what it's doing; nothing is uploaded anywhere):
 #   1. checks this Mac (Apple chip, macOS 26.6+, Xcode with its Metal compiler, Homebrew, Python 3.12+)
@@ -42,7 +43,7 @@ git -C "$NX" checkout --quiet -B oot-online "$COMMIT" 2>/dev/null || git -C "$NX
 git -C "$NX" checkout --quiet -- . 2>/dev/null || true
 
 say "3/5 Adding OoT Online to it"
-for patch in nxnative-mac26-translator.patch nxnative-xcode27.1-blend-ref.patch nxnative-frame-step-gpu-span.patch; do   # macOS 26 (the translator), Xcode 27.1 (a shader helper) and frame-step (60 fps held: the GPU cost read from its span) fixes
+for patch in nxnative-mac26-translator.patch nxnative-xcode27.1-blend-ref.patch nxnative-frame-step-gpu-span.patch nxnative-no-xcode.patch; do   # macOS 26 (the translator), Xcode 27.1 (a shader helper) and frame-step (60 fps held: the GPU cost read from its span) fixes, and the no-Xcode build the installer uses (this setup builds with Xcode: the same tree)
     git -C "$NX" apply --check "$ROOT/patches/$patch" 2>/dev/null && git -C "$NX" apply "$ROOT/patches/$patch" || say "($patch is already there)"
 done
 $PY -I "$ROOT/tools/integrate_nxnative.py" "$NX"
