@@ -40,6 +40,7 @@ __attribute__((weak)) int  mp_game_go_to_field(void) { return 1; }
 __attribute__((weak)) void mp_game_ui_tick(void) { }
 __attribute__((weak)) void mp_game_world_prep(void) { }
 __attribute__((weak)) void mp_game_notice(const char *line) { (void)line; }
+__attribute__((weak)) void mp_game_demo_input(uint64_t *buttons, int32_t axes[4]) { (void)buttons; (void)axes; }
 __attribute__((weak)) int  mp_game_lobby(int want, const char *text, const char *const labels[3], int *decided) { (void)want; (void)text; (void)labels; *decided = -1; return 0; }
 __attribute__((weak)) void mp_game_gate_event(uint64_t *regs) { (void)regs; }
 __attribute__((weak)) void mp_game_gate_gameover(uint64_t *regs) { (void)regs; }
@@ -395,6 +396,7 @@ void dm_mp_input_filter(uint64_t *buttons, int32_t axes[4]) {
     }
     pthread_mutex_unlock(&g_lb_mu);
     if (lobby || editing) { *buttons = 0; axes[0] = axes[1] = axes[2] = axes[3] = 0; }
+    else mp_game_demo_input(buttons, axes);   // footage: a scene's scripted pad (DM_MP_DEMO's I rows; nothing otherwise)
 }
 
 void dm_mp_shutdown(void) { if (atomic_exchange(&g_on, 0)) mp_stop(); }

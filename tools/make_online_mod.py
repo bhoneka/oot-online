@@ -92,9 +92,37 @@ def main():
             for k in ('ELinkUserName', 'SLinkUserName'):
                 if k in lrow: row[k] = lrow[k]
         add(actor_rows, actor_edit); add(game_rows, lambda row: None)
+
+    # ---- OnlineNavi: each stand-in's own fairy (the client keeps her at its shoulder). The cutscene Navi (Dm_Npc_Navi: her model, glow and
+    # sounds; she shares the screen with the real Navi in cutscenes) with the gameplay Navi's animation sequence (Npc_Navi: Wait, Fly, Turn...,
+    # the cutscene one has none: its events animate her) and no AI, so she never goes after our own Link
+    navi, dm, gp = 'OnlineNavi', 'Dm_Npc_Navi', 'Npc_Navi'
+    pack = read_sarc(romfs_read.read(img, f'Pack/Actor/{dm}.pack.zs'))
+    donor = read_sarc(romfs_read.read(img, f'Pack/Actor/{gp}.pack.zs'))
+    donor_ap = read_byml(donor[f'Actor/{gp}.engine__actor__ActorParam.bgyml'])['Components']
+    ap = read_byml(pack.pop(f'Actor/{dm}.engine__actor__ActorParam.bgyml')); comps = ap.setdefault('Components', {})
+    for key in ('ASRef', 'ASInfoRef', 'AnimationRef'):
+        ref = donor_ap.get(key)
+        if not ref: continue
+        comps[key] = ref; inner = ref.lstrip('?')
+        if inner in donor and inner not in pack: pack[inner] = donor[inner]
+    comps['AIInfoRef'] = ''
+    # no physics either: the client places her every frame, and with the cutscene Navi's character controller one stayed caught on the
+    # drawbridge's pillar over the moat while her Link walked off (runs/vid13)
+    comps['PhysicsRef'] = ''
+    pack[f'Actor/{navi}.engine__actor__ActorParam.bgyml'] = write_byml(ap)
+    put(f'Pack/Actor/{navi}.pack.zs', write_sarc(pack), 'pack.zsdic')
+    print(f'Pack/Actor/{navi}.pack.zs: {dm} with {gp}\'s animation sequence, no AI, no physics ({len(pack)} files)')
+    nrow = next(r for r in actor_rows if r['__RowId'] == gp)
+    for rows, heap in ((actor_rows, True), (game_rows, False)):
+        rows[:] = [r for r in rows if r.get('__RowId') != navi]
+        row = copy.deepcopy(next(r for r in rows if r.get('__RowId') == dm)); row['__RowId'] = navi; row.pop('ActorName', None)
+        if heap: row['InstanceHeapSize'] = max(row.get('InstanceHeapSize', 0), nrow.get('InstanceHeapSize', 0))
+        keys = [r['__RowId'] for r in rows]; assert keys == sorted(keys), 'table not sorted by name'
+        rows.insert(bisect.bisect_left(keys, navi), row)
     for rel, rows in ((ACTOR_INFO, actor_rows), (GAME_ACTOR_INFO, game_rows)):
         data = write_byml(rows); assert read_byml(data) == rows
-        put(rel, data, 'zs.zsdic'); print(f'{rel}: OnlinePlayer_Adult and _Child rows ({len(rows)} rows)')
+        put(rel, data, 'zs.zsdic'); print(f'{rel}: OnlinePlayer_Adult, _Child and OnlineNavi rows ({len(rows)} rows)')
 
     # ---- the resource size table (RESTBL v1: "RESTBL", u32 version 1, u32 name length 160, u32 crc count, u32 name count;
     # sorted (crc32(path), size) pairs; then (char[160] path, u32 size) for colliding paths). The path is the RomFS path without .zs
@@ -116,7 +144,7 @@ def main():
     for rel, data in written.items():
         key = rel[:-3] if rel.endswith('.zs') else rel
         if key.startswith('Pack/Actor/') and key.endswith('.pack'):
-            stock_rel = rel.replace('OnlinePlayer_', 'PouchPlayer_')
+            stock_rel = rel.replace('OnlinePlayer_', 'PouchPlayer_').replace('OnlineNavi', 'Dm_Npc_Navi')
             stock = read_sarc(romfs_read.read(img, stock_rel))
             for inner, body in read_sarc(data).items():
                 if stock.get(inner) != body: need_entry(inner, 5000 + 3 * len(body) + MARGIN)

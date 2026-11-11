@@ -24,6 +24,7 @@ int  mp_game_take_local_events(void);
 // sentence; labels: the three buttons (Play, Tunic, Name). Returns 0 when the game's window cannot be used now (no Link in the
 // world, the screens not there: the caller shows its own page), 1 opening, 2 open, 3 closing. *decided: the button the player
 // chose this frame (0..2), else -1; the window closes itself after a choice (ask again to show it again)
+void mp_game_demo_input(uint64_t *buttons, int32_t axes[4]);   // game thread, at player 1's input read: footage's scripted pad (tests)
 void mp_game_notice(const char *line);                  // any thread: a one-line notice in the game's own info bar (queued, one at a time)
 int  mp_game_go_to_field(void);                         // world tick: take Link to the shared place (Hyrule Field) unless he is there; 1 = under way or there, 0 = not now (try again)
 int  mp_game_ready(void);                               // 1 = this build is known: the game's own window is the lobby (else the drawn page)

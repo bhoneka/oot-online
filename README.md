@@ -61,7 +61,8 @@ it with `OOT_ONLINE_SERVER=<address>:4697`.
 
 The game runs natively through [nxnative](https://github.com/seedds/nxnative) (MIT), which turns your copy into a Mac app.
 OoT Online adds a small module to nxnative's host (`client/`): it reads Link's state each frame, sends it to the server,
-and shows the other players as stand-in Links walking with Link's own animations. The lobby, the notices and the item
+and shows the other players as stand-in Links with Link's own animations (their walk and run follow their speed) and a
+Navi each. The lobby, the notices and the item
 prompts are the game's own screens and fonts. `setup/ootonline-setup.sh` does the whole build; `server/` is the server.
 Both game versions work: the launch version and its update. Technical notes: [DEVELOPMENT.md](DEVELOPMENT.md).
 

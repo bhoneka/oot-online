@@ -1,0 +1,41 @@
+# OoT Online's public server on Fly.io (deploy from this folder: fly deploy --ha=false).
+# One machine only: players must all be on the same server, so never two copies (--ha=false, no scaling out).
+# UDP needs a dedicated IPv4 (fly ips allocate-v4); the shared one carries only HTTP.
+app = "oot-online"
+primary_region = "iad"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[[mounts]]
+  source = "oot_data"
+  destination = "/data"
+
+# The games: UDP 4697
+[[services]]
+  protocol = "udp"
+  internal_port = 4697
+  auto_stop_machines = "off"
+  auto_start_machines = false
+  min_machines_running = 1
+  [[services.ports]]
+    port = 4697
+
+# The status API the website reads (https://<app>.fly.dev/api/state)
+[[services]]
+  protocol = "tcp"
+  internal_port = 4696
+  auto_stop_machines = "off"
+  auto_start_machines = false
+  min_machines_running = 1
+  [[services.ports]]
+    port = 443
+    handlers = ["tls", "http"]
+  [[services.ports]]
+    port = 80
+    handlers = ["http"]
+    force_https = true
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"

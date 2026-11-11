@@ -4,7 +4,7 @@
 // game draws a few dozen stand-ins. Chat, arrows between players, deaths and respawns go through here; everything the
 // game itself does (walking, enemies, the world) stays in each player's own game.
 //
-//   node server.js [--port 4697] [--http 4696] [--http-host 127.0.0.1] [--tick 20] [--nearby 24] [--view 150]
+//   node server.js [--port 4697] [--udp-host ADDR] [--http 4696] [--http-host 127.0.0.1] [--tick 20] [--nearby 24] [--view 150]
 //                  [--max 4000] [--per-ip 8] [--code WORD] [--build e0f3ccfa[,33fa6c2c]] [--arrow-dmg 4] [--respawn-ms 4000]
 //                  [--invuln-ms 3000] [--join-scene N] [--motd "text"] [--data DIR] [--quiet]
 //
@@ -29,6 +29,7 @@ const opt = (name, def) => {
 };
 const CFG = {
   port: opt('port', 4697),
+  udpHost: String(opt('udp-host', '') || ''),   // the address the game port binds (all by default); on Fly.io fly-global-services, the only one its UDP reaches
   http: opt('http', 4696),
   httpHost: opt('http-host', '127.0.0.1'),
   tickHz: Math.max(5, Math.min(60, opt('tick', 20))),
@@ -623,9 +624,9 @@ const httpServer = http.createServer((req, res) => {
 });
 
 // ---------------------------------------------------------------- start
-sock.bind(CFG.port, () => {
+sock.bind(CFG.port, CFG.udpHost || undefined, () => {
   sock.setRecvBufferSize?.(8 << 20); sock.setSendBufferSize?.(8 << 20);
-  log(`OoT Online server: UDP ${CFG.port}, HTTP ${CFG.httpHost}:${CFG.http}, ${CFG.tickHz} Hz, ${CFG.nearby} nearest within ${CFG.view}` + (CFG.code ? ', room code on' : '') + (CFG.build ? `, build ${CFG.build}` : ''));
+  log(`OoT Online server: UDP ${CFG.udpHost ? CFG.udpHost + ':' : ''}${CFG.port}, HTTP ${CFG.httpHost}:${CFG.http}, ${CFG.tickHz} Hz, ${CFG.nearby} nearest within ${CFG.view}` + (CFG.code ? ', room code on' : '') + (CFG.build ? `, build ${CFG.build}` : ''));
   scheduleTick();
 });
 httpServer.listen(CFG.http, CFG.httpHost);

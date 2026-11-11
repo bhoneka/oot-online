@@ -1,0 +1,5 @@
+# Only server.js and protocol.js go into the image (Dockerfile). A server's live data and the tests stay out.
+data/
+test/
+node_modules/
+*.log

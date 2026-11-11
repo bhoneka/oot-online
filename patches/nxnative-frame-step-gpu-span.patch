@@ -1,8 +1,8 @@
 diff --git a/dm/gfx/nvn/hle_nvn.c b/dm/gfx/nvn/hle_nvn.c
-index 42d5ccef..2d947c37 100644
+index 42d5ccef..ba62f1b2 100644
 --- a/dm/gfx/nvn/hle_nvn.c
 +++ b/dm/gfx/nvn/hle_nvn.c
-@@ -2314,7 +2314,15 @@ static void fstep_tick(const win_t *o, int c) {
+@@ -2314,7 +2315,15 @@ static void fstep_tick(const win_t *o, int c) {
      const double v = 1e9 / fstep_hz();
      uint64_t st = g_fs_start ? g_fs_start : now_ns(), pw = g_fs_wait; g_fs_start = g_fs_wait = 0;
      double shown = prev ? (st - prev) / v : 0, gpu = 0; prev = st;
@@ -19,3 +19,16 @@ index 42d5ccef..2d947c37 100644
      double cpu = shown - pw / v, cost = cpu > gpu ? cpu : gpu;
      int kmin = fstep_hz() / c, kmax = fps_high() ? 2 : !fstep_hold() ? kmin : kmin >= 2 ? 2 : FSTEP_MAX, k0 = g_fs.k,   // at 120 fps a late frame must step down whatever fps_hold says: the game steps by the target
           kmin0 = g_fs.kmin, probe0 = g_fs.probe;
+@@ -2342,6 +2351,12 @@ static void fstep_tick(const win_t *o, int c) {
+     g_fs.ramp = mtl_probe_ramp_on();
+     g_fs.per_vsync = fstep_hz() / 60;
+     int n = nvn_fstep_next(&g_fs, shown, cost, kmin, kmax, fixed, cslow || gslow);
++    {   // DM_FSTEP_ONE=1 (frame-exact recordings): every frame steps the game the cap's vsyncs and no more, however long it took, so frame i is game
++        // time i/60 s. A run saving every frame (DM_NVN_SHOT) is slower than real time; without this the late frames stepped 2 vsyncs and
++        // anything moved by real-time clocks (another player's stand-in) drifted against the game's own animation
++        static int one = -1; if (one < 0) { const char *e = getenv("DM_FSTEP_ONE"); one = e && atoi(e); if (one) LOG("[nvn] frame step: every frame steps %d vsync(s) of game time (DM_FSTEP_ONE)", kmin); }
++        if (one && !fixed) n = kmin;
++    }
+     if (dm_fps_state) __atomic_store_n((uint32_t *)(dm_fps_state + 0x20), (uint32_t)n, __ATOMIC_RELAXED);
+     atomic_store(&g_fs_k, g_fs.k);
+     held[g_fs.k]++; if (fixed) fixed_sum += (uint64_t)n;   // the stubs count only the host's steps

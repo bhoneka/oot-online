@@ -23,6 +23,7 @@
 #include <time.h>
 #include "mp_net.h"
 #include "mp_game.h"
+uint64_t dm_guest_frame(void);   // the host's presented-frame count (hle_os.c)
 
 #ifndef MP_GAME_LOG
 #define MP_GAME_LOG(...) do { fprintf(stderr, "[dm] mp-oot: " __VA_ARGS__); fputc('\n', stderr); } while (0)
@@ -209,16 +210,17 @@ static uint16_t anim_index(const char *cmd) {
     if (strstr(cmd, "Dead")) return 14;
     return 0;
 }
-static int current_command(uint64_t actor, char *out, size_t cap) {   // AS slot 0's command name (QueryASGetCurrentCommand, main+0xcb06a0)
+static int slot_command(uint64_t actor, int si, char *out, size_t cap) {   // AS slot si's command name (QueryASGetCurrentCommand, main+0xcb06a0, reads slot 0)
     out[0] = 0;
     uint64_t as = comp(actor, C_AS); if (!as) return 0;
-    uint64_t ctrl = rp(rp(as + 0x18) + 0x18); if (!ctrl || (int32_t)r32(ctrl + 0x18) < 1) return 0;
-    uint64_t slot = rp(rp(ctrl + 0x20)); if (!slot) return 0;
+    uint64_t ctrl = rp(rp(as + 0x18) + 0x18); if (!ctrl || (int32_t)r32(ctrl + 0x18) <= si) return 0;
+    uint64_t slot = rp(rp(ctrl + 0x20) + 0x48ull * si); if (!slot) return 0;
     uint64_t name = rp(slot + 0x10); if (!name) return 0;
     if (!rd(name, out, cap - 1)) { size_t i = 0; while (i < cap - 1 && rd(name + i, out + i, 1) && out[i]) i++; out[i] = 0; }
     out[cap - 1] = 0; out[strnlen(out, cap - 1)] = 0;
     return out[0] != 0;
 }
+static int current_command(uint64_t actor, char *out, size_t cap) { return slot_command(actor, 0, out, cap); }   // Link's own: slot 0
 static int banc_name(char *out, size_t cap) {   // getCurrentNormalizedBancName (main+0x58aac0): the basename of the banc path
     out[0] = 0;
     uint64_t bm = rp((uint64_t)M + G_BANC_MGR); if (!bm) return 0;
@@ -247,6 +249,9 @@ static uint32_t shared_scene(const char *banc) {
 int mp_game_ready(void) { return ready(); }   // the server compares it as the first 8 hex digits of the build ID
 
 static double now_s(void) { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); return ts.tv_sec + ts.tv_nsec / 1e9; }
+// Seconds of game time in a frame-exact recording (DM_FSTEP_ONE: frames / 60, however slowly a run that saves every frame goes), else
+// real time: what arrows in flight and Navi's bobbing move by, so they keep pace with the game's own animation in footage
+static double game_now(void) { static int one = -1; if (one < 0) one = getenv("DM_FSTEP_ONE") && atoi(getenv("DM_FSTEP_ONE")); return one ? (double)dm_guest_frame() / 60.0 : now_s(); }
 static int g_probe = -1;
 static char g_scene_name[64];
 
@@ -388,7 +393,14 @@ static void travel_tick(void) {   // world tick, once a frame (re/AREA_CHANGE.md
     }
     if (g_tr.st != prev) MP_GAME_LOG("travel: %s", g_tr.st == 2 ? "the carrier event plays" : g_tr.st == 3 ? "loading the area" : g_tr.st == 4 ? "arrived, settling" : g_tr.st == 5 ? "done" : "failed (reservation cleared)");
 }
-static const char *field_banc(void) { return gd_bool(H_CHILDHOOD) ? "HyruleField_Child" : "HyruleField_Adult"; }
+// DM_MP_FIELD_AGE=adult / child (tests only, on a test run's own save): that age's Field, which makes Link that age when he arrives
+// (re/AREA_CHANGE.md: the banc's IsChildWhenChangeBanc switches him); unset: his own age's
+static const char *field_banc(void) {
+    static env_switch s = { .name = "DM_MP_FIELD_AGE" }; const char *e = env_now(&s);
+    if (!strcmp(e, "adult")) return "HyruleField_Adult";
+    if (!strcmp(e, "child")) return "HyruleField_Child";
+    return gd_bool(H_CHILDHOOD) ? "HyruleField_Child" : "HyruleField_Adult";
+}
 // The shared place's arrival point: in the open Field in front of the Castle Town drawbridge (both ages have it). runs/eighth:
 // ReturnFromDreamWorld, the "central" one, is inside the Lon Lon Ranch house (the ranch is part of the Field's map). DM_MP_FIELD_POS overrides
 static const char *field_pos(void) { static env_switch s = { .name = "DM_MP_FIELD_POS" }; const char *e = env_now(&s); return e[0] ? e : "HyruleField_FrontOfMarket"; }
@@ -397,7 +409,7 @@ int mp_game_go_to_field(void) {   // world tick: 1 = under way, or already in th
     uint64_t a = player_actor(); if (!a) return 0;
     char bn[64]; if (!banc_name(bn, sizeof bn)) return 0;
     if (g_tr.st > 0 && g_tr.st < 5) return 1;
-    if (!strncmp(bn, "HyruleField", 11)) {   // already in the Field: near the hub (in front of the drawbridge, -0.04 150.66 32.16) stays,
+    if (!strncmp(bn, "HyruleField", 11) && !strcmp(bn, field_banc())) {   // already in the Field (this age's): near the hub (in front of the drawbridge, -0.04 150.66 32.16) stays,
         float q[3]; rd(a + A_POS, q, sizeof q);   // farther (a new game starts by the Kokiri Forest bridge, 340 m off) goes there
         float dx = q[0] + 0.04f, dz = q[2] - 32.16f;
         if (dx * dx + dz * dz < 150.f * 150.f || strcmp(field_pos(), "HyruleField_FrontOfMarket")) return 1;
@@ -643,7 +655,11 @@ static void test_tick(int ui_ctx) {   // ui_ctx: the UI tick (the frame gate: no
 // area forgets them without deleting. Damage goes into LifeComponent's pending counter; a hit that would end Link is a
 // heal + warp to the server's spawn instead of the game's Game Over (deaths from the world still take the game's own path).
 #define MAX_PUPPETS 16
-typedef struct { uint16_t id; uint64_t watch; uint64_t actor; int outfit, child; double asked; int anim; char name[32]; int dressed; double taken_at; uint8_t arg[0xa0] __attribute__((aligned(16)));
+typedef struct { uint16_t id; uint64_t watch; uint64_t actor; int outfit, child; double asked; int anim; char name[32]; int dressed; double taken_at;
+                 float lx, lz, spd; uint64_t lf; double lt; int moving, bb_said;   // puppet_speed: the last position, when, the speed it gives (m/s, smoothed)
+                 double check_t; int replays;   // puppet_check: when its sequence was last checked, how often a command had to be played again
+                 uint64_t navi_watch, navi; int navi_anim; uint8_t navi_arg[0xa0] __attribute__((aligned(16)));   // navi_tick: its own fairy
+                 uint8_t arg[0xa0] __attribute__((aligned(16)));
                  uint8_t bb[0x1918] __attribute__((aligned(16))); } Puppet;
 static Puppet g_pup[MAX_PUPPETS];
 static uint32_t g_pup_scene;
@@ -660,11 +676,43 @@ static void yaw_matrix(float *m, float x, float y, float z, uint16_t yaw) {   //
 // AS play (main+0x2022a0): an ASPlayRecord {actor, command, slot, rate, -1, -1, ignore same, all slots}; only Link's animation set
 // (OnlinePlayer) has his commands, the inventory Link's knows two
 typedef bool (*f_as_play)(void *rec);
-static void as_play(uint64_t actor, const char *cmd) {
-    if (!standin_online()) return;
+// An actor's animation controller (the AS component's controller set, its current one: QueryASGetCurrentCommand's chain) and its
+// blackboard (+0x40, TOTK's as::Controller layout, the same engine). 0 while a new stand-in's sequence is not bound yet
+static uint64_t as_controller(uint64_t actor) { uint64_t as = comp(actor, C_AS); return as ? rp(rp(as + 0x18) + 0x18) : 0; }
+// 1 = played. A stand-in's first frames have no controller yet: the play does nothing then, and a command sent once (the network's
+// animation changes only when the player's does) left it in its bind pose for good: the T-pose of runs/vid3, arms out
+// The slot of a stand-in's sequence that moves its whole body: 1. Slot 0 took the plays (its command read back right) but nothing showed:
+// stand-ins stood in their bind pose, arms out and no cap (its visibility is an animation track too), all four of runs/diag1, near and
+// far; on slot 1 all four stood and walked (diag2). TOTK Royale found the same ("Wait in slot 1 stands it up from the T-pose").
+// DM_MP_AS_SLOT overrides (tests)
+static int as_body_slot(void) { static int slot = -1; if (slot < 0) { const char *e = getenv("DM_MP_AS_SLOT"); slot = e && *e ? atoi(e) : 1; } return slot; }
+static int as_play_rate(uint64_t actor, const char *cmd, float rate) {
+    if (!standin_online() || !as_controller(actor)) return 0;
+    int slot = as_body_slot();
     struct { uint64_t actor; const char *cmd; int32_t slot; float rate; float a, b; uint8_t ignore_same, all_slots; uint8_t pad[6]; } rec =
-        { actor, cmd, 0, 1.0f, -1.0f, -1.0f, 1, 0, { 0 } };
-    ((f_as_play)fn(F_AS_PLAY))(&rec);
+        { actor, cmd, slot, rate, -1.0f, -1.0f, 1, 0, { 0 } };
+    return ((f_as_play)fn(F_AS_PLAY))(&rec) ? 1 : 0;
+}
+static void as_play(uint64_t actor, const char *cmd) { as_play_rate(actor, cmd, 1.0f); }
+// DM_MP_BBPROBE=1 (tests): Link's animation blackboard twice a second: its five value arrays' heads (TOTK's order: string, int, float, bool,
+// vec3f at +0x18..+0x38), then the 100-entry one's words as floats and the 94-entry one's bytes, to find which entries his movement drives
+static void bb_probe(uint64_t a) {
+    static int on = -1; static double last; if (on < 0) on = getenv("DM_MP_BBPROBE") && atoi(getenv("DM_MP_BBPROBE"));
+    if (!on) return;
+    double t = now_s(); if (t - last < 0.5) return; last = t;
+    uint64_t ctrl = as_controller(a), bb = ctrl ? rp(ctrl + 0x40) : 0; if (!bb) { MP_GAME_LOG("bbprobe: no blackboard (controller %#llx)", (unsigned long long)ctrl); return; }
+    char line[2400]; int w = snprintf(line, sizeof line, "bbprobe: frame %llu bb %#llx vt %#llx arrays", (unsigned long long)dm_guest_frame(), (unsigned long long)bb, (unsigned long long)(rp(bb) - (uint64_t)M));
+    uint64_t fa = 0, ba = 0;
+    for (int k = 0; k < 5; k++) { uint64_t arr = rp(bb + 0x18 + 8ull * k); uint32_t c = arr ? r32(arr) : 0; w += snprintf(line + w, sizeof line - w, " [%d] %#llx n=%u", k, (unsigned long long)arr, c);
+        if (c == 100 && !fa) fa = arr; else if (c == 94 && !ba) ba = arr; }
+    MP_GAME_LOG("%s", line);
+    if (fa) { w = snprintf(line, sizeof line, "bbprobe: f100"); for (int i = 0; i < 104 && w < (int)sizeof line - 16; i++) { float v; if (!rd(fa + 4 + 4ull * i, &v, 4)) break; w += snprintf(line + w, sizeof line - w, " %d:%.3g", i, v); } MP_GAME_LOG("%s", line); }
+    if (ba) { w = snprintf(line, sizeof line, "bbprobe: b94"); for (int i = 0; i < 100 && w < (int)sizeof line - 8; i++) { uint8_t v; if (!rd(ba + 4 + i, &v, 1)) break; w += snprintf(line + w, sizeof line - w, "%s%u", i % 10 ? "" : " ", v); } MP_GAME_LOG("%s", line); }
+}
+// The rate a stand-in plays Move at, by age: DM_MP_MOVE_RATE_ADULT / DM_MP_MOVE_RATE_CHILD (tests: matching the run's stride to the speed)
+static float move_rate(int child) {
+    static env_switch a = { .name = "DM_MP_MOVE_RATE_ADULT" }, c = { .name = "DM_MP_MOVE_RATE_CHILD" };
+    float r = (float)atof(env_now(child ? &c : &a)); return r > 0.05f && r < 4 ? r : 1.0f;
 }
 static void puppet_request(Puppet *p, const mp_remote *o, int child) {
     memset(p->arg, 0, sizeof p->arg); memset(p->bb, 0, sizeof p->bb);
@@ -703,12 +751,106 @@ static void puppet_dress(Puppet *p) {
     else ((f_req_equip)fn(F_REQ_EQUIP))((void *)eu, 8, &armor, 0, true);
     MP_GAME_LOG("stand-in for %s dressed: %s", p->name, armor);
 }
+// The walk / run blend of Link's Move reads his animation blackboard's stick and speed values, which only his player code sets: on a
+// stand-in they stayed at their defaults and Move barely moved the legs while the body slid along (the "floating" of runs/vid3; TOTK
+// Royale had the same, its "hovering"). Every frame the stand-in's own blackboard gets the values Link's has at its speed. Where those
+// values sit: Link's own, read while he runs and stands (DM_MP_BBPROBE, runs/rec2): the float array is the one with 100 entries
+// (Player_<age>.root.asb's), entries from +4; the bool array the one with 94, a byte each from +4
+// Measured (runs/rec2, adult Link: stick 1 at a 5.1-5.4 m/s run, 0.4 at a 1.7 m/s walk, 0 standing; the same names in Player_Child.root.asb):
+//   floats 0 LeftStickLength, 1 PrevLeftStickLength, 2 LeftStickLengthClampMin (never under 0.55), 8 LinearVelXZ (m/s), 13 LeftStickY,
+//   16 LeftStickDeg; bool 12 IsLeftStickInput (1 exactly while he moves). Young Link runs at 4.5 m/s at a full tilt (runs/rec1)
+enum { BBF_STICK = 0, BBF_PREV_STICK = 1, BBF_STICK_MIN = 2, BBF_VEL = 8, BBF_STICK_Y = 13, BBF_STICK_DEG = 16, BBB_INPUT = 12 };
+static const float g_stick_full_c = 4.5f, g_stick_full_a = 5.3f;   // m/s at a full tilt, young / adult
+static void puppet_speed(Puppet *p, float x, float z) {
+    static int one = -1; if (one < 0) one = getenv("DM_FSTEP_ONE") && atoi(getenv("DM_FSTEP_ONE"));
+    uint64_t f = dm_guest_frame(); double t = now_s();
+    // the time since the last frame: game frames in a frame-exact recording (DM_FSTEP_ONE, which can run far slower than real time), else real time
+    float dt = p->lf ? (one ? (float)(f - p->lf) / 60.0f : (float)(t - p->lt)) : 0;
+    float jump = p->lf ? sqrtf((x - p->lx) * (x - p->lx) + (z - p->lz) * (z - p->lz)) : 0;
+    if (dt > 0 && dt < 0.5f && jump < 3.0f) {
+        float v = jump / dt, k = 1.0f - expf(-10.0f * dt); p->spd += (v - p->spd) * k;
+    } else if (dt >= 0.5f || jump >= 3.0f) p->spd = 0;   // a long gap, or a jump of metres in a frame (a respawn, a warp): no speed from it
+    p->lx = x; p->lz = z; p->lf = f; p->lt = t;
+    p->moving = p->spd > (p->moving ? 0.3f : 0.8f);   // a margin either way: one threshold flickered on a slow stroll
+    uint64_t ctrl = as_controller(p->actor), bb = ctrl ? rp(ctrl + 0x40) : 0; if (!bb) return;
+    uint64_t fa = 0, ba = 0;
+    for (int k = 0; k < 5; k++) { uint64_t arr = rp(bb + 0x18 + 8ull * k); uint32_t c = arr ? r32(arr) : 0; if (c == 100 && !fa) fa = arr; else if (c == 94 && !ba) ba = arr; }
+    if (!fa || !ba) { if (!p->bb_said) { p->bb_said = 1; MP_GAME_LOG("[RED] stand-in for %s: no animation blackboard of Link's shape (floats %#llx, bools %#llx): its legs won't follow its speed", p->name, (unsigned long long)fa, (unsigned long long)ba); } return; }
+    if (!p->bb_said) { p->bb_said = 1; MP_GAME_LOG("stand-in for %s: its walk / run follows its speed (blackboard %#llx)", p->name, (unsigned long long)bb); }
+    float full = p->child ? g_stick_full_c : g_stick_full_a, stick = p->moving ? (p->spd >= full ? 1.0f : p->spd / full) : 0;
+    if (p->moving && stick < 0.25f) stick = 0.25f;
+    volatile float *fv = (volatile float *)(fa + 4);
+    fv[BBF_PREV_STICK] = fv[BBF_STICK]; fv[BBF_STICK] = stick; fv[BBF_STICK_MIN] = stick > 0.55f ? stick : 0.55f;
+    fv[BBF_VEL] = p->moving ? p->spd : 0; fv[BBF_STICK_Y] = stick; fv[BBF_STICK_DEG] = 0;
+    *(volatile uint8_t *)(ba + 4 + BBB_INPUT) = (uint8_t)p->moving;
+}
+// Twice a second: is the stand-in's body slot playing what it was told? Wait and Move only,
+// the commands that last (a one-off like DamageS hands over to another by itself). DM_MP_PROBE logs each stand-in's slots every 2 s
+static void puppet_check(Puppet *p, double t, float dist) {
+    if (p->anim < 0 || t - p->check_t < 0.5) return;
+    p->check_t = t;
+    char cur[64]; int ok = slot_command(p->actor, as_body_slot(), cur, sizeof cur);
+    static int probe = -1; if (probe < 0) probe = getenv("DM_MP_PROBE") && atoi(getenv("DM_MP_PROBE"));
+    if (probe && (int)(t * 2) % 4 == 0) {
+        uint64_t ctrl = as_controller(p->actor);
+        char slots[400]; int w = 0; slots[0] = 0;   // every slot's command: which one is the body
+        int ns = ctrl ? (int)r32(ctrl + 0x18) : 0; uint64_t arr = ctrl ? rp(ctrl + 0x20) : 0;
+        for (int i = 0; i < ns && i < 12 && arr && w < (int)sizeof slots - 40; i++) {
+            uint64_t sl = rp(arr + 0x48ull * i), nm = sl ? rp(sl + 0x10) : 0; char c[32] = ""; if (nm) { rd(nm, c, sizeof c - 1); c[sizeof c - 1] = 0; }
+            w += snprintf(slots + w, sizeof slots - w, " %d:%s", i, c[0] ? c : "-");
+        }
+        MP_GAME_LOG("stand-in %s: %.1f m away, told %s, slots%s (state %u, speed %.2f)", p->name, dist, ANIM[p->anim], slots, r32(p->actor + A_STATE), p->spd);
+    }
+    if (p->anim > 1 || (ok && !strcmp(cur, ANIM[p->anim]))) return;
+    int r = as_play_rate(p->actor, ANIM[p->anim], p->anim == 1 ? move_rate(p->child) : 1.0f);
+    if (p->replays++ < 4) MP_GAME_LOG("stand-in for %s: its sequence plays '%s', not %s: played again (%s)", p->name, ok ? cur : "(nothing)", ANIM[p->anim], r ? "taken" : "refused");
+}
+// Every stand-in has its own Navi, as Link has: OnlineNavi (tools/make_online_mod.py: the cutscene Navi's model, glow and sounds with the
+// gameplay Navi's animation sequence and no AI) made beside it and kept at its shoulder each frame, bobbing and drifting a little the way
+// Navi hovers. DM_MP_NAVI=0: none. Deleted with its stand-in
+static void navi_drop(Puppet *p) {
+    if (p->navi && r32(p->navi + A_STATE) >= 3 && r32(p->navi + A_STATE) <= 6) ((f_request_delete)fn(F_REQUEST_DELETE))((void *)p->navi, 0);
+    watch_cancel(&p->navi_watch); p->navi = 0; p->navi_anim = 0;
+}
+static void navi_spot(const Puppet *p, const mp_remote *o, float *out) {
+    double a = o->yaw / 65536.0 * 2 * M_PI, t = game_now() + p->id * 0.37;
+    float fx = (float)sin(a), fz = (float)cos(a), rx = -fz, rz = fx;   // its facing, and its right
+    float side = 0.42f + 0.10f * (float)sin(t * 1.3), back = 0.20f + 0.08f * (float)sin(t * 0.9 + 1.0);
+    float up = (p->child ? 1.02f : 1.48f) + 0.07f * (float)sin(t * 2.4);
+    out[0] = o->x + rx * side - fx * back; out[1] = o->y + up; out[2] = o->z + rz * side - fz * back;
+}
+static void navi_tick(Puppet *p, const mp_remote *o) {
+    static env_switch sw = { .name = "DM_MP_NAVI" }; if (!strcmp(env_now(&sw), "0")) return;
+    float at[3]; navi_spot(p, o, at);
+    if (!p->navi && !p->navi_watch) {
+        memset(p->navi_arg, 0, sizeof p->navi_arg);
+        float rot[9] = { 1, 0, 0, 0, 1, 0, 0, 0, 1 }, sc[3] = { 1, 1, 1 };
+        memcpy(p->navi_arg + 0x00, at, 12); memcpy(p->navi_arg + 0x0c, rot, 36); memcpy(p->navi_arg + 0x30, sc, 12);
+        static const char *empty = ""; memcpy(p->navi_arg + 0x40, &empty, 8);
+        p->navi_arg[0x4a] = 1; *(uint32_t *)(p->navi_arg + 0x98) = 1 | 2 | 4;
+        static const char *name = "OnlineNavi"; uint32_t result = 0;
+        bool ok = ((f_create)fn(F_CREATE_ACTOR))((void *)rp((uint64_t)M + G_ACTOR_MGR), &name, p->navi_arg, &p->navi_watch, 1, NULL, NULL, NULL, 0, &result, NULL);
+        static int said; if (!ok && said++ < 3) MP_GAME_LOG("Navi for %s not requested (result %u)", p->name, result);
+        return;
+    }
+    if (!p->navi) { if ((p->navi = watch_take(&p->navi_watch))) MP_GAME_LOG("Navi for %s taken", p->name); return; }
+    uint32_t st = r32(p->navi + A_STATE); if (st == 3) return;
+    if (st != 4) { p->navi = 0; return; }   // gone (the game deleted her): made again next frame
+    float m[12]; yaw_matrix(m, at[0], at[1], at[2], o->yaw);
+    ((f_force_set_matrix)fn(F_FORCE_SET_MATRIX))((void *)p->navi, m, false);
+    if (!p->navi_anim && as_controller(p->navi)) {   // her idle hover (the gameplay Navi's Wait), on each slot it could be
+        struct { uint64_t actor; const char *cmd; int32_t slot; float rate; float a, b; uint8_t ignore_same, all_slots; uint8_t pad[6]; } rec =
+            { p->navi, "Wait", 0, 1.0f, -1.0f, -1.0f, 1, 1, { 0 } };
+        p->navi_anim = ((f_as_play)fn(F_AS_PLAY))(&rec) ? 1 : 0;
+        if (p->navi_anim) { char c0[32] = "", c1[32] = ""; slot_command(p->navi, 0, c0, sizeof c0); slot_command(p->navi, 1, c1, sizeof c1);
+                            MP_GAME_LOG("Navi for %s hovers (slots 0 '%s', 1 '%s')", p->name, c0, c1); }
+    }
+}
 static void puppets_update(uint64_t me, const mp_remote *o, int n, uint32_t scene) {
     if (scene != g_pup_scene) {   // a new area: the game deleted the stand-ins; requests still pending are cancelled (they would leak the engine's watchers)
-        for (int i = 0; i < MAX_PUPPETS; i++) watch_cancel(&g_pup[i].watch);
+        for (int i = 0; i < MAX_PUPPETS; i++) { watch_cancel(&g_pup[i].watch); watch_cancel(&g_pup[i].navi_watch); }
         memset(g_pup, 0, sizeof g_pup); g_pup_scene = scene;
     }
-    (void)me;
     if (n > MAX_PUPPETS) n = MAX_PUPPETS;
     // remove the ones no longer near (or who changed clothes: dressed again)
     for (int i = 0; i < MAX_PUPPETS; i++) {
@@ -718,6 +860,7 @@ static void puppets_update(uint64_t me, const mp_remote *o, int n, uint32_t scen
             if (o[j].id == p->id && c == p->child && (c || o[j].outfit == p->outfit) && !(o[j].flags & MP_PF_DEAD)) keep = 1; }
         if (!keep) {
             if (p->actor && r32(p->actor + A_STATE) >= 3 && r32(p->actor + A_STATE) <= 6) ((f_request_delete)fn(F_REQUEST_DELETE))((void *)p->actor, 0);
+            navi_drop(p);
             watch_cancel(&p->watch); p->id = 0; p->actor = 0;
         }
     }
@@ -730,7 +873,7 @@ static void puppets_update(uint64_t me, const mp_remote *o, int n, uint32_t scen
         if (!p->actor) {
             if (p->watch) {
                 uint64_t a = watch_take(&p->watch);
-                if (a) { p->actor = a; p->taken_at = t; p->dressed = 0; MP_GAME_LOG("stand-in for %s (#%u) taken", p->name, p->id); }
+                if (a) { p->actor = a; p->taken_at = t; p->dressed = 0; p->lf = 0; p->spd = 0; p->moving = 0; p->bb_said = 0; p->check_t = 0; p->replays = 0; MP_GAME_LOG("stand-in for %s (#%u) taken", p->name, p->id); }
                 else if (!p->watch) p->id = 0;                                   // the game said no (freed): asked again next frame
                 else if (t - p->asked > 10) { watch_cancel(&p->watch); p->id = 0; }   // never came: cancelled, asked again
             } else p->id = 0;
@@ -741,7 +884,14 @@ static void puppets_update(uint64_t me, const mp_remote *o, int n, uint32_t scen
         if (ast != 4) { p->id = 0; p->actor = 0; continue; }   // gone (deleted by the game)
         float m[12]; yaw_matrix(m, o[j].x, o[j].y, o[j].z, o[j].yaw);
         ((f_force_set_matrix)fn(F_FORCE_SET_MATRIX))((void *)p->actor, m, false);
-        if (p->anim != o[j].anim && o[j].anim < N_ANIM) { as_play(p->actor, ANIM[o[j].anim]); p->anim = o[j].anim; }
+        puppet_speed(p, o[j].x, o[j].z);
+        navi_tick(p, &o[j]);
+        {   // DM_MP_PUPLOG=<file> (tests): where each stand-in is drawn every frame, to measure how smoothly others move
+            static int on = -1; static FILE *lf; if (on < 0) { const char *e = getenv("DM_MP_PUPLOG"); on = e && *e && (lf = fopen(e, "w")) != NULL; if (on) fprintf(lf, "#frame\tt\tid\tx\ty\tz\tyaw\tanim\tspd\n"); }
+            if (on) { fprintf(lf, "%llu\t%.4f\t%u\t%.4f\t%.4f\t%.4f\t%u\t%u\t%.3f\n", (unsigned long long)dm_guest_frame(), now_s(), o[j].id, o[j].x, o[j].y, o[j].z, o[j].yaw, o[j].anim, p->spd); fflush(lf); }
+        }
+        { float lp[3] = { 0, 0, 0 }; rd(me + A_POS, lp, sizeof lp); float dx = o[j].x - lp[0], dz = o[j].z - lp[2]; puppet_check(p, t, sqrtf(dx * dx + dz * dz)); }
+        if (p->anim != o[j].anim && o[j].anim < N_ANIM && as_play_rate(p->actor, ANIM[o[j].anim], o[j].anim == 1 ? move_rate(p->child) : 1.0f)) p->anim = o[j].anim;   // (not played: again next frame)
         if (!p->child && !p->dressed && t - p->taken_at > 0.3) puppet_dress(p);
     }
 }
@@ -914,6 +1064,94 @@ static void kit_tick(uint64_t link) {
     }
 }
 
+// ---- test footage (tools/demo_compose.py). DM_MP_TRACE=<file>: Link's state every frame (frame, position, facing, the animation
+// the network carries, age, the game's own command). DM_MP_DEMO=<file> with DM_MP_DEMO_AT=<frame>: the other players come from that
+// file from that frame on, one row per player per frame, in place of the server's. With DM_FSTEP_ONE a frame is 1/60 s of game time
+// however slowly a run that saves every frame goes, so recorded players move exactly as fast as the game animates them
+uint64_t dm_guest_frame(void);
+static void trace_tick(uint64_t a) {
+    static int on = -1; static FILE *f;
+    if (on < 0) { const char *p = getenv("DM_MP_TRACE"); on = p && *p && (f = fopen(p, "w")) != NULL; if (on) fprintf(f, "#frame\tx\ty\tz\tyaw\tanim\tchild\tcmd\n"); }
+    if (!on) return;
+    mp_local_state st; if (!mp_game_read_local(&st)) return;
+    char cmd[64]; if (!current_command(a, cmd, sizeof cmd)) snprintf(cmd, sizeof cmd, "?");
+    fprintf(f, "%llu\t%.4f\t%.4f\t%.4f\t%u\t%u\t%d\t%s\n", (unsigned long long)dm_guest_frame(), st.x, st.y, st.z, st.yaw, st.anim, !!(st.equip & MP_EQ_CHILD), cmd);
+    fflush(f);   // a run ends by a signal: every line already on disk
+}
+static void apply_damage(int quarter_hearts, uint16_t attacker);
+typedef struct { uint32_t f; mp_remote r; } demo_row;
+// Event rows (tools/demo_compose.py): "E frame shot shooter x y z dx dy dz" (an arrow from another player, drawn as theirs are),
+// "E frame damage quarter_hearts attacker" (a hit on our Link, as the server's), "E frame notice text" (the game's info bar).
+// Input rows: "I frame buttons lx ly rx ry" (hex buttons, sticks -32767..32767): player 1's pad from that frame to the next I row
+typedef struct { uint32_t f; char kind; uint16_t who; int qh; float v[6]; char text[96]; } demo_event;
+typedef struct { uint32_t f; uint64_t buttons; int32_t axes[4]; } demo_input;
+static demo_event *g_dev; static size_t g_ndev, g_dev_at;
+static demo_input *g_din; static size_t g_ndin;
+static uint64_t g_demo_at; static int g_demo_on = -1;
+void mp_game_demo_input(uint64_t *buttons, int32_t axes[4]) {   // hle_mp.c, at player 1's input read: the scripted pad, if any for now
+    if (g_demo_on != 1 || !g_ndin) return;
+    uint64_t fr = dm_guest_frame(); if (fr < g_demo_at) return;
+    uint64_t rel = fr - g_demo_at; const demo_input *cur = NULL;
+    for (size_t i = 0; i < g_ndin && g_din[i].f <= rel; i++) cur = &g_din[i];
+    if (!cur) return;
+    *buttons = cur->buttons; memcpy(axes, cur->axes, sizeof cur->axes);
+}
+static void demo_events(uint64_t rel) {
+    while (g_dev_at < g_ndev && g_dev[g_dev_at].f <= rel) {
+        const demo_event *e = &g_dev[g_dev_at++];
+        if (e->kind == 's') mp_game_shot_fx(e->who, e->v[0], e->v[1], e->v[2], e->v[3], e->v[4], e->v[5], 0);
+        else if (e->kind == 'd') apply_damage(e->qh, e->who);
+        else if (e->kind == 'n') mp_game_notice(e->text);
+        MP_GAME_LOG("demo: event %c at %u", e->kind, e->f);
+    }
+}
+static const mp_remote *demo_others(const mp_remote *o, int *n) {
+    static int on = -1; static demo_row *rows; static size_t nrows, at_row; static uint64_t at; static mp_remote cur[MAX_PUPPETS]; static int ncur, said;
+    if (on < 0) {
+        on = 0; g_demo_on = 0; const char *p = getenv("DM_MP_DEMO"), *e = getenv("DM_MP_DEMO_AT");
+        FILE *f = p && *p ? fopen(p, "r") : NULL; if (!f) return o;
+        char line[256]; size_t cap = 0, ecap = 0, icap = 0;
+        while (fgets(line, sizeof line, f)) {   // frame id name outfit child x y z yaw anim [flags], in frame order
+            if (line[0] == 'E') {
+                demo_event ev; memset(&ev, 0, sizeof ev); char kind[16]; int k = 0; unsigned fr, who;
+                if (sscanf(line, "E %u %15s %n", &fr, kind, &k) < 2) continue;
+                ev.f = fr; const char *rest = line + k;
+                if (!strcmp(kind, "shot") && sscanf(rest, "%u %f %f %f %f %f %f", &who, &ev.v[0], &ev.v[1], &ev.v[2], &ev.v[3], &ev.v[4], &ev.v[5]) == 7) { ev.kind = 's'; ev.who = (uint16_t)who; }
+                else if (!strcmp(kind, "damage") && sscanf(rest, "%d %u", &ev.qh, &who) == 2) { ev.kind = 'd'; ev.who = (uint16_t)who; }
+                else if (!strcmp(kind, "notice")) { ev.kind = 'n'; snprintf(ev.text, sizeof ev.text, "%s", rest); ev.text[strcspn(ev.text, "\r\n")] = 0; }
+                else continue;
+                if (g_ndev == ecap) { ecap = ecap ? ecap * 2 : 64; demo_event *ne = realloc(g_dev, ecap * sizeof *g_dev); if (!ne) break; g_dev = ne; }
+                g_dev[g_ndev++] = ev; continue;
+            }
+            if (line[0] == 'I') {
+                demo_input in; memset(&in, 0, sizeof in); unsigned fr; unsigned long long b; int a0, a1, a2, a3;
+                if (sscanf(line, "I %u %llx %d %d %d %d", &fr, &b, &a0, &a1, &a2, &a3) != 6) continue;
+                in.f = fr; in.buttons = b; in.axes[0] = a0; in.axes[1] = a1; in.axes[2] = a2; in.axes[3] = a3;
+                if (g_ndin == icap) { icap = icap ? icap * 2 : 64; demo_input *ni = realloc(g_din, icap * sizeof *g_din); if (!ni) break; g_din = ni; }
+                g_din[g_ndin++] = in; continue;
+            }
+            demo_row d; memset(&d, 0, sizeof d); unsigned id, yaw, anim, outfit, child, flags = 0; char name[MP_NAME_MAX];
+            if (line[0] == '#' || sscanf(line, "%u %u %23s %u %u %f %f %f %u %u %u", &d.f, &id, name, &outfit, &child, &d.r.x, &d.r.y, &d.r.z, &yaw, &anim, &flags) < 10) continue;
+            d.r.id = (uint16_t)id; d.r.yaw = (uint16_t)yaw; d.r.anim = (uint16_t)anim; d.r.outfit = (uint8_t)outfit; d.r.equip = child ? MP_EQ_CHILD : 0; d.r.hp_pct = 100; d.r.flags = (uint8_t)flags;
+            snprintf(d.r.name, sizeof d.r.name, "%s", name);
+            if (nrows == cap) { cap = cap ? cap * 2 : 8192; demo_row *nr = realloc(rows, cap * sizeof *rows); if (!nr) break; rows = nr; }
+            rows[nrows++] = d;
+        }
+        fclose(f); at = e ? strtoull(e, 0, 0) : 0; on = nrows > 0; g_demo_at = at; g_demo_on = on;
+        MP_GAME_LOG("demo: %zu rows, %zu events, %zu input rows from %s, playing from frame %llu", nrows, g_ndev, g_ndin, p, (unsigned long long)at);
+    }
+    if (!on) return o;
+    uint64_t fr = dm_guest_frame();
+    if (fr < at) { *n = 0; return cur; }   // before it starts: nobody (a demo run shows only its own players)
+    uint64_t rel = fr - at; size_t i = at_row;
+    demo_events(rel);
+    while (i < nrows && rows[i].f < rel) i++;
+    if (i < nrows && rows[i].f == rel) { ncur = 0; for (; i < nrows && rows[i].f == rel; i++) if (ncur < MAX_PUPPETS) cur[ncur++] = rows[i].r; }
+    at_row = i;   // past the last row the last frame's players stay where they are
+    if (!said) { said = 1; MP_GAME_LOG("demo: started at frame %llu with %d players", (unsigned long long)fr, ncur); }
+    *n = ncur; return cur;
+}
+
 static void notices_tick(void);
 static void flights_tick(uint32_t scene);
 static void tags_tick(const mp_remote *o, int n);
@@ -925,6 +1163,9 @@ void mp_game_update_puppets(const mp_remote *others, int n) {
     if (!live()) return;
     uint64_t a = player_actor(); if (!a) { memset(g_pup, 0, sizeof g_pup); return; }
     char bn[64]; if (!banc_name(bn, sizeof bn)) return;
+    trace_tick(a);
+    bb_probe(a);
+    others = demo_others(others, &n);
     puppets_update(a, others, n, mm3(bn));
     local_shots(a, others, n);
     kit_tick(a);
@@ -1111,7 +1352,7 @@ void mp_game_shot_fx(uint16_t s, float x, float y, float z, float dx, float dy, 
     static const char *name = "Pouch_Arrow_Normal"; uint32_t result = 0;
     bool ok = ((f_create)fn(F_CREATE_ACTOR))((void *)rp((uint64_t)M + G_ACTOR_MGR), &name, f->arg, &f->watch, 1, NULL, NULL, NULL, 0, &result, NULL);
     if (!ok) { static int said; if (!said++) MP_GAME_LOG("arrow in flight not requested (result %u)", result); return; }
-    f->t0 = now_s(); f->live = 1; f->scene = g_fl_scene;
+    f->t0 = game_now(); f->live = 1; f->scene = g_fl_scene;
     f->maxd = 45.0f * 0.9f;   // its range, or up to our Link when the line passes him (it hit us: the server says so separately)
     float me[3] = { 0, 0, 0 }; if (!rd(player_actor() + A_POS, me, sizeof me)) me[1] = -1e9f; me[1] += 1.0f;
     float rel[3] = { me[0] - x, me[1] - y, me[2] - z }, along = rel[0] * f->d[0] + rel[1] * f->d[1] + rel[2] * f->d[2];
@@ -1119,7 +1360,7 @@ void mp_game_shot_fx(uint16_t s, float x, float y, float z, float dx, float dy, 
     static env_switch sp = { .name = "DM_MP_ARROW_SPEED" }; f->speed = atof(env_now(&sp)); if (!(f->speed > 0)) f->speed = 45.0f;   // (a slow one for a test's screenshot)
 }
 static void flights_tick(uint32_t scene) {   // world tick: each arrow in the air one step on, the spent ones deleted
-    double t = now_s(); g_fl_scene = scene;
+    double t = game_now(); g_fl_scene = scene;
     for (int i = 0; i < FLIGHTS; i++) {
         flight_t *f = &g_fl[i]; if (!f->live) continue;
         if (f->scene != scene) { watch_cancel(&f->watch); f->live = 0; continue; }   // Link changed area meanwhile: that area's actors went with it
