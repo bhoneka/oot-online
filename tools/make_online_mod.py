@@ -74,7 +74,7 @@ def main():
         for key in ('ELinkRef', 'SLinkRef'):
             ref = donor_ap.get(key)
             if ref: pack[ref.lstrip('?')] = donor[ref.lstrip('?')]; comps[key] = ref
-        comps['AIInfoRef'] = ''
+        if not os.environ.get('OOT_STANDIN_KEEP_AI'): comps['AIInfoRef'] = ''   # (OOT_STANDIN_KEEP_AI=1: tests)
         pack[f'Actor/{name}.engine__actor__ActorParam.bgyml'] = write_byml(ap)
         put(f'Pack/Actor/{name}.pack.zs', write_sarc(pack), 'pack.zsdic')
         print(f'Pack/Actor/{name}.pack.zs: {pouch} with {link}\'s animation set, ASInfo and links, no AI ({len(pack)} files)')

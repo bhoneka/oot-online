@@ -1,5 +1,5 @@
 'use strict';
-// OoT Online wire protocol v1: UDP, little-endian, one message per datagram (<= 1200 bytes).
+// OoT Online wire protocol v2: UDP, little-endian, one message per datagram (<= 1200 bytes).
 // The server (server.js), bots.js and the tests use this file; the game side (the nxnative host module, C) mirrors it
 // field for field, so any layout change bumps VERSION (a game of another version gets REJECT VERSION).
 //
@@ -13,10 +13,12 @@
 // WELCOME  S>C: u32 nonce, u16 id, u32 token, u8 tickHz, u8 maxNearby, u16 online, str name (as the server made it unique), str motd
 // REJECT   S>C: u32 nonce, u8 reason (REJECT_REASON), str detail
 // STATE    C>S: u32 token, u32 seq, u32 ackSnap, u32 ackSrvEv,
-//               u32 scene, f32 x, y, z, u16 yaw, u16 anim, u8 flags (PF), u8 hp, u8 maxHp (quarter hearts), u8 equip, events
+//               u32 scene, f32 x, y, z, u16 yaw, u16 anim, u8 flags (PF), u8 hp, u8 maxHp (quarter hearts), u8 equip,
+//               u16 ageMs (how old the position is as it leaves: from the game frame it is of to this packet), events
 // SNAPSHOT S>C: u16 you, u32 seq, u32 ackState, u32 ackCliEv, u32 tMs, u16 online, u8 youFlags (YOU), events,
 //               u8 nShots, nShots x shot{u16 shooter, f32 x, y, z, s16 dx, dy, dz (unit x 32767), u8 kind},
-//               u8 n, n x player{u16 id, f32 x, y, z, u16 yaw, u16 anim, u8 flags, u8 hpPct, u8 outfit, u8 equip}
+//               u8 n, n x player{u16 id, f32 x, y, z, u16 yaw, u16 anim, u8 flags, u8 hpPct, u8 outfit, u8 equip,
+//               u16 ageMs (how long before tMs the player was there: games draw each player by these times, not the ticks')}
 // PING     C>S: u32 token, u32 clientTimeMs        PONG S>C: u32 clientTimeMs, u32 serverTimeMs
 // INFO_REQ C>S: u32 token, u8 n, n x u16 id        INFO S>C: u8 n, n x {u16 id, u8 kind, u8 outfit, str name}
 // BYE      C>S: u32 token
@@ -27,7 +29,7 @@
 // identifier as the game side reports it (opaque to the server: only players with the same scene see each other).
 
 const MAGIC = 0x4f4f;
-const VERSION = 1;
+const VERSION = 2;   // 2: ageMs in STATE and in each snapshot player (smooth movement: v1 drew by tick times, and others stuttered)
 const MAX_DGRAM = 1200;
 const NOBODY = 0xffff;
 
@@ -67,7 +69,7 @@ const REJECT_TEXT = ['', 'the server is full', 'another version of OoT Online', 
   'you are banned from this server', 'another build of the game', 'too many players from your address'];
 
 const SHOT_BYTES = 2 + 12 + 6 + 1;
-const PLAYER_BYTES = 2 + 12 + 2 + 2 + 1 + 1 + 1 + 1;
+const PLAYER_BYTES = 2 + 12 + 2 + 2 + 1 + 1 + 1 + 1 + 2;
 
 class Writer {
   constructor(size = MAX_DGRAM) { this.b = Buffer.allocUnsafe(size); this.o = 0; }
@@ -173,9 +175,9 @@ const parseServer = {
 const msg = {
   hello: ({ nonce, kind = KIND.PLAYER, outfit = 0, build = 0, playerKey = 0, name, prevToken = 0, code = '' }) =>
     new Writer(128).header(T.HELLO).u32(nonce).u8(kind).u8(outfit).u32(build).u32(playerKey).str(name, 24).u32(prevToken).str(code, 32).done(),
-  state: ({ token, seq, ackSnap, ackSrvEv, scene, x, y, z, yaw = 0, anim = 0, flags = 0, hp = 12, maxHp = 12, equip = 0, events = [] }) => {
+  state: ({ token, seq, ackSnap, ackSrvEv, scene, x, y, z, yaw = 0, anim = 0, flags = 0, hp = 12, maxHp = 12, equip = 0, ageMs = 0, events = [] }) => {
     const w = new Writer().header(T.STATE).u32(token).u32(seq).u32(ackSnap).u32(ackSrvEv)
-      .u32(scene).f32(x).f32(y).f32(z).u16(yaw).u16(anim).u8(flags).u8(hp).u8(maxHp).u8(equip);
+      .u32(scene).f32(x).f32(y).f32(z).u16(yaw).u16(anim).u8(flags).u8(hp).u8(maxHp).u8(equip).u16(ageMs);
     w.events(events, w.room());
     return w.done();
   },
@@ -192,7 +194,7 @@ function readSnapshot(r) {
   const ns = r.u8(); s.shots = [];
   for (let i = 0; i < ns; i++) s.shots.push({ shooter: r.u16(), x: r.f32(), y: r.f32(), z: r.f32(), dx: r.i16() / 32767, dy: r.i16() / 32767, dz: r.i16() / 32767, kind: r.u8() });
   const n = r.u8(); s.players = [];
-  for (let i = 0; i < n; i++) s.players.push({ id: r.u16(), x: r.f32(), y: r.f32(), z: r.f32(), yaw: r.u16(), anim: r.u16(), flags: r.u8(), hpPct: r.u8(), outfit: r.u8(), equip: r.u8() });
+  for (let i = 0; i < n; i++) s.players.push({ id: r.u16(), x: r.f32(), y: r.f32(), z: r.f32(), yaw: r.u16(), anim: r.u16(), flags: r.u8(), hpPct: r.u8(), outfit: r.u8(), equip: r.u8(), ageMs: r.u16() });
   return s;
 }
 function readInfo(r) { const n = r.u8(), out = []; for (let i = 0; i < n; i++) out.push({ id: r.u16(), kind: r.u8(), outfit: r.u8(), name: r.str() }); return out; }

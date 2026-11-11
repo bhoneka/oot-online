@@ -681,19 +681,41 @@ typedef bool (*f_as_play)(void *rec);
 static uint64_t as_controller(uint64_t actor) { uint64_t as = comp(actor, C_AS); return as ? rp(rp(as + 0x18) + 0x18) : 0; }
 // 1 = played. A stand-in's first frames have no controller yet: the play does nothing then, and a command sent once (the network's
 // animation changes only when the player's does) left it in its bind pose for good: the T-pose of runs/vid3, arms out
-// The slot of a stand-in's sequence that moves its whole body: 1. Slot 0 took the plays (its command read back right) but nothing showed:
-// stand-ins stood in their bind pose, arms out and no cap (its visibility is an animation track too), all four of runs/diag1, near and
-// far; on slot 1 all four stood and walked (diag2). TOTK Royale found the same ("Wait in slot 1 stands it up from the T-pose").
-// DM_MP_AS_SLOT overrides (tests)
+// A stand-in's sequence, played the way it shows: every command on slots 0 and 1 (as_play_rate; DM_MP_AS_SLOTS overrides). Slot 0
+// alone moved only the legs and left the rest in the bind pose (arms out, no cap: its visibility is an animation track too); slot 1
+// alone posed the whole body but stood still on its first frame (it keeps slot 0's time); on both they stand, walk and run as Link
+// does (runs/legs7). as_body_slot is the slot puppet_check reads back (DM_MP_AS_SLOT overrides)
 static int as_body_slot(void) { static int slot = -1; if (slot < 0) { const char *e = getenv("DM_MP_AS_SLOT"); slot = e && *e ? atoi(e) : 1; } return slot; }
 static int as_play_rate(uint64_t actor, const char *cmd, float rate) {
     if (!standin_online() || !as_controller(actor)) return 0;
-    int slot = as_body_slot();
-    struct { uint64_t actor; const char *cmd; int32_t slot; float rate; float a, b; uint8_t ignore_same, all_slots; uint8_t pad[6]; } rec =
-        { actor, cmd, slot, rate, -1.0f, -1.0f, 1, 0, { 0 } };
-    return ((f_as_play)fn(F_AS_PLAY))(&rec) ? 1 : 0;
+    // On every slot of DM_MP_AS_SLOTS (default "0,1"): slot 1 poses the whole body but keeps the time of slot 0, which moves the legs
+    // (alone, slot 1 stood still on its first frame and slot 0 left the arms in the bind pose: runs/legs3-5, yaw1)
+    static int slots[4], ns = -1;
+    if (ns < 0) { const char *e = getenv("DM_MP_AS_SLOTS"); if (!e || !*e) e = "0,1"; ns = 0;
+                  for (const char *q = e; *q && ns < 4; ) { slots[ns++] = atoi(q); q = strchr(q, ','); if (!q) break; q++; } }
+    int any = 0;
+    for (int i = 0; i < ns; i++) {
+        struct { uint64_t actor; const char *cmd; int32_t slot; float rate; float a, b; uint8_t ignore_same, all_slots; uint8_t pad[6]; } rec =
+            { actor, cmd, slots[i], rate, -1.0f, -1.0f, 1, 0, { 0 } };
+        any |= ((f_as_play)fn(F_AS_PLAY))(&rec) ? 1 : 0;
+    }
+    (void)any; return 1;   // called: done (what the call returns is not whether it played)
 }
 static void as_play(uint64_t actor, const char *cmd) { as_play_rate(actor, cmd, 1.0f); }
+// The command a stand-in plays for the network's Wait / Move (tests: DM_MP_WAIT_CMD, DM_MP_MOVE_CMD)
+static const char *standin_cmd(int anim) {
+    static env_switch w = { .name = "DM_MP_WAIT_CMD" }, m = { .name = "DM_MP_MOVE_CMD" };
+    if (anim == 0) { const char *e = env_now(&w); return e[0] ? e : "Wait"; }
+    if (anim == 1) { const char *e = env_now(&m); return e[0] ? e : "Move"; }
+    return ANIM[anim];
+}
+// A command on a given slot (Link's own: 0 the body, 4 the face, 8 the mask): what his player code keeps playing besides the body
+static void as_play_slot(uint64_t actor, const char *cmd, int slot) {
+    if (!standin_online() || !as_controller(actor)) return;
+    struct { uint64_t actor; const char *cmd; int32_t slot; float rate; float a, b; uint8_t ignore_same, all_slots; uint8_t pad[6]; } rec =
+        { actor, cmd, slot, 1.0f, -1.0f, -1.0f, 1, 0, { 0 } };
+    ((f_as_play)fn(F_AS_PLAY))(&rec);
+}
 // DM_MP_BBPROBE=1 (tests): Link's animation blackboard twice a second: its five value arrays' heads (TOTK's order: string, int, float, bool,
 // vec3f at +0x18..+0x38), then the 100-entry one's words as floats and the 94-entry one's bytes, to find which entries his movement drives
 static void bb_probe(uint64_t a) {
@@ -751,16 +773,26 @@ static void puppet_dress(Puppet *p) {
     else ((f_req_equip)fn(F_REQ_EQUIP))((void *)eu, 8, &armor, 0, true);
     MP_GAME_LOG("stand-in for %s dressed: %s", p->name, armor);
 }
-// The walk / run blend of Link's Move reads his animation blackboard's stick and speed values, which only his player code sets: on a
-// stand-in they stayed at their defaults and Move barely moved the legs while the body slid along (the "floating" of runs/vid3; TOTK
-// Royale had the same, its "hovering"). Every frame the stand-in's own blackboard gets the values Link's has at its speed. Where those
-// values sit: Link's own, read while he runs and stands (DM_MP_BBPROBE, runs/rec2): the float array is the one with 100 entries
-// (Player_<age>.root.asb's), entries from +4; the bool array the one with 94, a byte each from +4
+// The walk / run blend of Link's Move reads his animation blackboard's stick and speed values, which only his player code sets (TOTK
+// Royale's stand-ins "hovered" without them): every frame the stand-in's own blackboard gets the values Link's has at its speed, so it
+// walks at a walk and runs at a run. Where those values sit: Link's own, read while he runs and stands (DM_MP_BBPROBE, runs/rec2): the
+// float array with 100 entries (Player_<age>.root.asb's) at +0x28, the bool array with 94 at +0x30, entries from +4
 // Measured (runs/rec2, adult Link: stick 1 at a 5.1-5.4 m/s run, 0.4 at a 1.7 m/s walk, 0 standing; the same names in Player_Child.root.asb):
 //   floats 0 LeftStickLength, 1 PrevLeftStickLength, 2 LeftStickLengthClampMin (never under 0.55), 8 LinearVelXZ (m/s), 13 LeftStickY,
 //   16 LeftStickDeg; bool 12 IsLeftStickInput (1 exactly while he moves). Young Link runs at 4.5 m/s at a full tilt (runs/rec1)
 enum { BBF_STICK = 0, BBF_PREV_STICK = 1, BBF_STICK_MIN = 2, BBF_VEL = 8, BBF_STICK_Y = 13, BBF_STICK_DEG = 16, BBB_INPUT = 12 };
 static const float g_stick_full_c = 4.5f, g_stick_full_a = 5.3f;   // m/s at a full tilt, young / adult
+// Setting a value as the blackboard's own setters do (its vtable [16] setFloatByIndex main+0x37b9cc0, [17] setBoolByIndex main+0x37ba100):
+// the value, then one more on its change count (animation nodes can read a value again only when its count moved). Floats at +0x28
+// (u32 count, values), their counts at +0x58 (u32 count, a byte each); bools at +0x30 / +0x60
+static void bb_set_f(uint64_t bb, int i, float v) {
+    uint64_t a = rp(bb + 0x28), c = rp(bb + 0x58); if (!a || !c || (uint32_t)i >= r32(a) || (uint32_t)i >= r32(c)) return;
+    *(volatile float *)(a + 4 + 4ull * i) = v; volatile uint8_t *k = (volatile uint8_t *)(c + 4 + i); *k = (uint8_t)(*k + 1);
+}
+static void bb_set_b(uint64_t bb, int i, int v) {
+    uint64_t a = rp(bb + 0x30), c = rp(bb + 0x60); if (!a || !c || (uint32_t)i >= r32(a) || (uint32_t)i >= r32(c)) return;
+    *(volatile uint8_t *)(a + 4 + i) = (uint8_t)(v != 0); volatile uint8_t *k = (volatile uint8_t *)(c + 4 + i); *k = (uint8_t)(*k + 1);
+}
 static void puppet_speed(Puppet *p, float x, float z) {
     static int one = -1; if (one < 0) one = getenv("DM_FSTEP_ONE") && atoi(getenv("DM_FSTEP_ONE"));
     uint64_t f = dm_guest_frame(); double t = now_s();
@@ -773,16 +805,31 @@ static void puppet_speed(Puppet *p, float x, float z) {
     p->lx = x; p->lz = z; p->lf = f; p->lt = t;
     p->moving = p->spd > (p->moving ? 0.3f : 0.8f);   // a margin either way: one threshold flickered on a slow stroll
     uint64_t ctrl = as_controller(p->actor), bb = ctrl ? rp(ctrl + 0x40) : 0; if (!bb) return;
-    uint64_t fa = 0, ba = 0;
-    for (int k = 0; k < 5; k++) { uint64_t arr = rp(bb + 0x18 + 8ull * k); uint32_t c = arr ? r32(arr) : 0; if (c == 100 && !fa) fa = arr; else if (c == 94 && !ba) ba = arr; }
-    if (!fa || !ba) { if (!p->bb_said) { p->bb_said = 1; MP_GAME_LOG("[RED] stand-in for %s: no animation blackboard of Link's shape (floats %#llx, bools %#llx): its legs won't follow its speed", p->name, (unsigned long long)fa, (unsigned long long)ba); } return; }
+    uint64_t fa = rp(bb + 0x28), ba = rp(bb + 0x30);
+    if (!fa || !ba || r32(fa) != 100 || r32(ba) != 94 || !rp(bb + 0x58) || !rp(bb + 0x60)) {
+        if (!p->bb_said) { p->bb_said = 1; MP_GAME_LOG("[RED] stand-in for %s: no animation blackboard of Link's shape (floats %#llx, bools %#llx): its legs won't follow its speed", p->name, (unsigned long long)fa, (unsigned long long)ba); }
+        return;
+    }
     if (!p->bb_said) { p->bb_said = 1; MP_GAME_LOG("stand-in for %s: its walk / run follows its speed (blackboard %#llx)", p->name, (unsigned long long)bb); }
     float full = p->child ? g_stick_full_c : g_stick_full_a, stick = p->moving ? (p->spd >= full ? 1.0f : p->spd / full) : 0;
     if (p->moving && stick < 0.25f) stick = 0.25f;
-    volatile float *fv = (volatile float *)(fa + 4);
-    fv[BBF_PREV_STICK] = fv[BBF_STICK]; fv[BBF_STICK] = stick; fv[BBF_STICK_MIN] = stick > 0.55f ? stick : 0.55f;
-    fv[BBF_VEL] = p->moving ? p->spd : 0; fv[BBF_STICK_Y] = stick; fv[BBF_STICK_DEG] = 0;
-    *(volatile uint8_t *)(ba + 4 + BBB_INPUT) = (uint8_t)p->moving;
+    {   // DM_MP_BBCOPY=1 (tests): our own Link's whole blackboard first (ints, bools, floats, each through its change count), so the
+        // stand-in's sequence sees the same surroundings Link's does; its own movement values go over it below
+        static int copy = -1; if (copy < 0) copy = getenv("DM_MP_BBCOPY") && atoi(getenv("DM_MP_BBCOPY"));
+        uint64_t me = player_actor(), mc = me ? as_controller(me) : 0, mb = mc ? rp(mc + 0x40) : 0;
+        if (copy && mb) {
+            uint64_t mi = rp(mb + 0x18), ii = rp(bb + 0x18), mic = rp(mb + 0x48), iic = rp(bb + 0x48);
+            if (mi && ii && iic && r32(mi) == r32(ii)) for (uint32_t i = 0; i < r32(ii); i++) {
+                int32_t v; rd(mi + 4 + 4ull * i, &v, 4); if (*(volatile int32_t *)(ii + 4 + 4ull * i) != v) { *(volatile int32_t *)(ii + 4 + 4ull * i) = v; volatile uint8_t *k = (volatile uint8_t *)(iic + 4 + i); *k = (uint8_t)(*k + 1); } }
+            uint64_t mf = rp(mb + 0x28), mbo = rp(mb + 0x30);
+            if (mf && r32(mf) == 100) for (int i = 0; i < 100; i++) { float v; rd(mf + 4 + 4ull * i, &v, 4); if (*(volatile float *)(fa + 4 + 4ull * i) != v) bb_set_f(bb, i, v); }
+            if (mbo && r32(mbo) == 94) for (int i = 0; i < 94; i++) { uint8_t v; rd(mbo + 4 + i, &v, 1); if (*(volatile uint8_t *)(ba + 4 + i) != v) bb_set_b(bb, i, v); }
+        }
+    }
+    float prev = *(volatile float *)(fa + 4 + 4ull * BBF_STICK);
+    bb_set_f(bb, BBF_PREV_STICK, prev); bb_set_f(bb, BBF_STICK, stick); bb_set_f(bb, BBF_STICK_MIN, stick > 0.55f ? stick : 0.55f);
+    bb_set_f(bb, BBF_VEL, p->moving ? p->spd : 0); bb_set_f(bb, BBF_STICK_Y, stick); bb_set_f(bb, BBF_STICK_DEG, 0);
+    bb_set_b(bb, BBB_INPUT, p->moving);
 }
 // Twice a second: is the stand-in's body slot playing what it was told? Wait and Move only,
 // the commands that last (a one-off like DamageS hands over to another by itself). DM_MP_PROBE logs each stand-in's slots every 2 s
@@ -801,8 +848,8 @@ static void puppet_check(Puppet *p, double t, float dist) {
         }
         MP_GAME_LOG("stand-in %s: %.1f m away, told %s, slots%s (state %u, speed %.2f)", p->name, dist, ANIM[p->anim], slots, r32(p->actor + A_STATE), p->spd);
     }
-    if (p->anim > 1 || (ok && !strcmp(cur, ANIM[p->anim]))) return;
-    int r = as_play_rate(p->actor, ANIM[p->anim], p->anim == 1 ? move_rate(p->child) : 1.0f);
+    if (p->anim > 1 || (ok && !strcmp(cur, standin_cmd(p->anim)))) return;
+    int r = as_play_rate(p->actor, standin_cmd(p->anim), p->anim == 1 ? move_rate(p->child) : 1.0f);
     if (p->replays++ < 4) MP_GAME_LOG("stand-in for %s: its sequence plays '%s', not %s: played again (%s)", p->name, ok ? cur : "(nothing)", ANIM[p->anim], r ? "taken" : "refused");
 }
 // Every stand-in has its own Navi, as Link has: OnlineNavi (tools/make_online_mod.py: the cutscene Navi's model, glow and sounds with the
@@ -846,6 +893,26 @@ static void navi_tick(Puppet *p, const mp_remote *o) {
                             MP_GAME_LOG("Navi for %s hovers (slots 0 '%s', 1 '%s')", p->name, c0, c1); }
     }
 }
+// DM_MP_BBPROBE=1 also logs the first stand-in's whole blackboard every second (floats and bools, as for Link): what Link's own code
+// keeps set that a stand-in lacks
+static void bb_dump(const char *who, uint64_t actor) {
+    uint64_t ctrl = as_controller(actor), bb = ctrl ? rp(ctrl + 0x40) : 0; if (!bb) return;
+    uint64_t fa = rp(bb + 0x28), ba = rp(bb + 0x30), ia = rp(bb + 0x18); if (!fa || !ba) return;
+    char line[2600]; int w = snprintf(line, sizeof line, "bbdump %s f", who);
+    for (int i = 0; i < 100 && w < (int)sizeof line - 16; i++) { float v; rd(fa + 4 + 4ull * i, &v, 4); w += snprintf(line + w, sizeof line - w, " %d:%.3g", i, v); }
+    MP_GAME_LOG("%s", line);
+    w = snprintf(line, sizeof line, "bbdump %s b", who);
+    for (int i = 0; i < 94 && w < (int)sizeof line - 8; i++) { uint8_t v; rd(ba + 4 + i, &v, 1); w += snprintf(line + w, sizeof line - w, "%s%u", i % 10 ? "" : " ", v); }
+    if (ia) { w += snprintf(line + w, sizeof line - w, " i"); for (int i = 0; i < 37 && w < (int)sizeof line - 16; i++) { int32_t v; rd(ia + 4 + 4ull * i, &v, 4); w += snprintf(line + w, sizeof line - w, " %d:%d", i, v); } }
+    MP_GAME_LOG("%s", line);
+    w = snprintf(line, sizeof line, "bbdump %s slots", who);   // and every slot's command and play rate (slot+0xd4)
+    int ns = (int)r32(ctrl + 0x18); uint64_t arr = rp(ctrl + 0x20);
+    for (int i = 0; i < ns && i < 12 && arr && w < (int)sizeof line - 60; i++) {
+        uint64_t sl = rp(arr + 0x48ull * i), nm = sl ? rp(sl + 0x10) : 0; char c[40] = ""; float rate = 0; if (nm) { rd(nm, c, sizeof c - 1); c[sizeof c - 1] = 0; } if (sl) rd(sl + 0xd4, &rate, 4);
+        w += snprintf(line + w, sizeof line - w, " %d:%s@%.2f", i, c[0] ? c : "-", rate);
+    }
+    MP_GAME_LOG("%s", line);
+}
 static void puppets_update(uint64_t me, const mp_remote *o, int n, uint32_t scene) {
     if (scene != g_pup_scene) {   // a new area: the game deleted the stand-ins; requests still pending are cancelled (they would leak the engine's watchers)
         for (int i = 0; i < MAX_PUPPETS; i++) { watch_cancel(&g_pup[i].watch); watch_cancel(&g_pup[i].navi_watch); }
@@ -884,6 +951,8 @@ static void puppets_update(uint64_t me, const mp_remote *o, int n, uint32_t scen
         if (ast != 4) { p->id = 0; p->actor = 0; continue; }   // gone (deleted by the game)
         float m[12]; yaw_matrix(m, o[j].x, o[j].y, o[j].z, o[j].yaw);
         ((f_force_set_matrix)fn(F_FORCE_SET_MATRIX))((void *)p->actor, m, false);
+        { static int probe = -1; static double last; if (probe < 0) probe = getenv("DM_MP_BBPROBE") && atoi(getenv("DM_MP_BBPROBE"));
+          if (probe && p == &g_pup[0] && t - last > 1.0) { last = t; bb_dump(p->name, p->actor); bb_dump("Link", me); } }   // (before our writes)
         puppet_speed(p, o[j].x, o[j].z);
         navi_tick(p, &o[j]);
         {   // DM_MP_PUPLOG=<file> (tests): where each stand-in is drawn every frame, to measure how smoothly others move
@@ -891,7 +960,14 @@ static void puppets_update(uint64_t me, const mp_remote *o, int n, uint32_t scen
             if (on) { fprintf(lf, "%llu\t%.4f\t%u\t%.4f\t%.4f\t%.4f\t%u\t%u\t%.3f\n", (unsigned long long)dm_guest_frame(), now_s(), o[j].id, o[j].x, o[j].y, o[j].z, o[j].yaw, o[j].anim, p->spd); fflush(lf); }
         }
         { float lp[3] = { 0, 0, 0 }; rd(me + A_POS, lp, sizeof lp); float dx = o[j].x - lp[0], dz = o[j].z - lp[2]; puppet_check(p, t, sqrtf(dx * dx + dz * dz)); }
-        if (p->anim != o[j].anim && o[j].anim < N_ANIM && as_play_rate(p->actor, ANIM[o[j].anim], o[j].anim == 1 ? move_rate(p->child) : 1.0f)) p->anim = o[j].anim;   // (not played: again next frame)
+        if (p->anim != o[j].anim && o[j].anim < N_ANIM && as_play_rate(p->actor, standin_cmd(o[j].anim), o[j].anim == 1 ? move_rate(p->child) : 1.0f)) {   // (not played: again next frame)
+            p->anim = o[j].anim;
+            static int extra = -1; if (extra < 0) { const char *e = getenv("DM_MP_AS_EXTRA"); extra = e && *e ? atoi(e) : 1; }
+            if (extra) {   // the face and the mask, as Link's own code plays them (slot 4: FaceLocomotion moving, Wait standing; slot 8: MaskUnequip)
+                as_play_slot(p->actor, o[j].anim == 1 ? "FaceLocomotion" : "Wait", 4);
+                as_play_slot(p->actor, "MaskUnequip", 8);
+            }
+        }
         if (!p->child && !p->dressed && t - p->taken_at > 0.3) puppet_dress(p);
     }
 }

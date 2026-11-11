@@ -5,7 +5,7 @@
 #include <stdint.h>
 #include <stddef.h>
 
-#define MP_PROTOCOL 1
+#define MP_PROTOCOL 2   /* 2: ageMs in STATE and in each snapshot player (server/protocol.js) */
 #define MP_MAX_NEAR 40
 #define MP_NAME_MAX 25
 #define MP_CHAT_MAX 161

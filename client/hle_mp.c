@@ -222,9 +222,6 @@ static void present_body(void) {
                         atomic_exchange(&g_call_ns, 0) / 1e6 / n, atomic_exchange(&g_call_max_ns, 0) / 1e6, atomic_exchange(&g_pres_ns, 0) / 1e6 / n, atomic_exchange(&g_pres_max_ns, 0) / 1e6); lc = c;
             memcpy(last, v, sizeof v); }
     }
-    mp_local_state st;
-    if (mp_game_read_local(&st)) { g_last = st; mp_set_local(&st); }
-    else { memset(&st, 0, sizeof st); st.scene = 0xffffffffu; mp_set_local(&st); }   // not in the world (title, loading): nowhere, seen by nobody
     mp_status_t s; mp_status(&s);
     mp_ui_status(s.state, s.online, s.detail, s.ping_ms);
     mp_event e;
@@ -330,6 +327,12 @@ static void ui_tick(void) {
 // The world tick: the game's own thread and stack (player 1's input read); safe to write game state and to call the game
 void dm_mp_game_tick(void) {
     if (!atomic_load(&g_on)) return;
+    {   // our own state, once a game frame, at its start (Link where the last frame's update left him). Read on the present path it was
+        // taken at an uneven point of the game's update, so others saw us step 2, 4.5, 7 m/s for a steady 4.5 (runs/pairB net.tsv)
+        mp_local_state st;
+        if (mp_game_read_local(&st)) { g_last = st; mp_set_local(&st); }
+        else { memset(&st, 0, sizeof st); st.scene = 0xffffffffu; mp_set_local(&st); }   // not in the world (title, loading): nowhere, seen by nobody
+    }
     Pending p[64]; int n;
     pthread_mutex_lock(&g_pend_mu); n = g_pend_n; memcpy(p, g_pend, sizeof(Pending) * n); g_pend_n = 0; pthread_mutex_unlock(&g_pend_mu);
     for (int i = 0; i < n; i++) {

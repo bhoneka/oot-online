@@ -63,6 +63,14 @@ typedef struct { uint32_t id; uint8_t type, len; uint8_t payload[200]; } OutEv;
 #define EVQ 256
 #define SNAPS 24
 typedef struct { double t_local; uint32_t t_srv; int n; mp_remote p[MP_MAX_NEAR]; } Snap;
+// Each player's own track: the positions the snapshots carried, each at the server time the player was there (the snapshot's tMs less
+// its ageMs), the same state once however many snapshots repeat it. Others are drawn from their own track: with v1's tick times they
+// stuttered, because the server's 20 Hz ticks and the senders' own 20 Hz sends drift against each other (a tick with nothing new, then
+// one with two steps: runs/pairA, 32 stalls and 57 jumps in 211 frames)
+#define TRACKS 64
+#define TRACK_N 12
+typedef struct { double ts; mp_remote p; } Sample;
+typedef struct { uint16_t id; int used, n, head; double seen; Sample s[TRACK_N]; } Track;
 
 static struct {
     pthread_mutex_t mu;
@@ -83,6 +91,8 @@ static struct {
     OutEv outq[OUTQ]; int outq_n; uint32_t next_ev;
     // theirs
     Snap snaps[SNAPS]; int snap_head, snap_count;
+    Track tracks[TRACKS];
+    double local_t, local_raw, frame_ms;   // our state's time (mp_set_local: on the frames' beat), the last call's clock, the beat's period
     double clock_offset; int clock_init;   // server ms = local ms + offset (taken from the quickest snapshots)
     mp_event evq[EVQ]; int evq_head, evq_n;
     double info_asked[65536];
@@ -110,12 +120,35 @@ static void send_hello(void) {
     w_u32(&w, M.cfg.player_key); w_str(&w, M.name, 24); w_u32(&w, M.prev_token); w_str(&w, M.code, 32);
     send_buf(&w); M.last_hello = now_ms();
 }
+// DM_MP_NETLOG=<file> (tests): each state we send (S: now, the state's time, its age, x, z) and each sample others' tracks take
+// (R: id, its server time, x, z, our now), to see where any unevenness in others' movement comes from
+static FILE *netlog(void) { static int on = -1; static FILE *f; if (on < 0) { const char *e = getenv("DM_MP_NETLOG"); on = e && *e && (f = fopen(e, "w")) != NULL; } return on ? f : NULL; }
+static Track *track_find(uint16_t id) { for (int i = 0; i < TRACKS; i++) if (M.tracks[i].used && M.tracks[i].id == id) return &M.tracks[i]; return NULL; }
+static void track_add(const mp_remote *p, double ts, double t) {   // under M.mu
+    Track *tr = track_find(p->id);
+    if (!tr) {   // a new one: a free slot, else the one heard from longest ago
+        for (int i = 0; i < TRACKS && !tr; i++) if (!M.tracks[i].used) tr = &M.tracks[i];
+        if (!tr) { tr = &M.tracks[0]; for (int i = 1; i < TRACKS; i++) if (M.tracks[i].seen < tr->seen) tr = &M.tracks[i]; }
+        memset(tr, 0, sizeof *tr); tr->used = 1; tr->id = p->id;
+    }
+    tr->seen = t;
+    if (tr->n) {
+        const Sample *last = &tr->s[(tr->head + tr->n - 1) % TRACK_N];
+        if (ts <= last->ts + 3) return;   // the same state again (a later tick repeats it; ms rounding apart)
+    }
+    { FILE *f = netlog(); if (f) { fprintf(f, "R\t%u\t%.1f\t%.4f\t%.4f\t%.1f\n", p->id, ts, p->x, p->z, t); fflush(f); } }
+    Sample *sl = &tr->s[(tr->head + tr->n) % TRACK_N];
+    if (tr->n == TRACK_N) tr->head = (tr->head + 1) % TRACK_N; else tr->n++;
+    sl->ts = ts; sl->p = *p;
+}
 static void send_state(void) {   // under M.mu
     uint8_t b[MAX_DGRAM]; W w = { b, 0, sizeof b, 0 };
     mp_local_state s = M.local;
     w_header(&w, T_STATE); w_u32(&w, M.token); w_u32(&w, ++M.seq); w_u32(&w, M.last_snap); w_u32(&w, M.srv_ev_done);
     w_u32(&w, s.scene); w_f32(&w, s.x); w_f32(&w, s.y); w_f32(&w, s.z); w_u16(&w, s.yaw); w_u16(&w, s.anim);
     w_u8(&w, s.flags); w_u8(&w, s.hp); w_u8(&w, s.max_hp); w_u8(&w, s.equip);
+    { double now = now_ms(), age = now - M.local_t; w_u16(&w, (uint16_t)(age < 0 ? 0 : age > 1000 ? 1000 : age));   // ageMs: how old this position is
+      FILE *f = netlog(); if (f) { fprintf(f, "S\t%.1f\t%.1f\t%.1f\t%.4f\t%.4f\n", now, M.local_t, age, s.x, s.z); fflush(f); } }
     size_t at = w.n; w_u8(&w, 0); int n = 0;
     for (int i = 0; i < M.outq_n && n < 255; i++) {
         OutEv *e = &M.outq[i];
@@ -170,7 +203,7 @@ static void on_packet(const uint8_t *b, size_t n) {
         M.id = id; M.token = token; M.tick_hz = hz ? hz : 20; M.last_heard = t;
         M.st.state = MP_ONLINE; M.st.id = id; M.st.online = online; snprintf(M.st.name, sizeof M.st.name, "%s", name); M.st.detail[0] = 0;
         memcpy(NAMES[id], name, MP_NAME_MAX);
-        if (first) { M.seq = 0; M.last_snap = 0; M.srv_ev_done = 0; M.snap_count = 0; M.clock_init = 0; }
+        if (first) { M.seq = 0; M.last_snap = 0; M.srv_ev_done = 0; M.snap_count = 0; M.clock_init = 0; memset(M.tracks, 0, sizeof M.tracks); }
         MP_LOG("online as %s (#%u), %u players", name, id, online);
         break;
     }
@@ -218,8 +251,10 @@ static void on_packet(const uint8_t *b, size_t n) {
             mp_remote p; memset(&p, 0, sizeof p);
             p.id = r_u16(&r); p.x = r_f32(&r); p.y = r_f32(&r); p.z = r_f32(&r); p.yaw = r_u16(&r); p.anim = r_u16(&r);
             p.flags = r_u8(&r); p.hp_pct = r_u8(&r); p.outfit = r_u8(&r); p.equip = r_u8(&r);
+            uint16_t age = r_u16(&r);
             if (r.bad || sn->n >= MP_MAX_NEAR) break;
             sn->p[sn->n++] = p;
+            track_add(&p, (double)tms - age, t);
             if (!NAMES[p.id][0] && t - M.info_asked[p.id] > 1000 && nu < 100) { unknown[nu++] = p.id; M.info_asked[p.id] = t; }
         }
         // the server's clock: the quickest-arriving snapshots give the offset; it drifts back up slowly
@@ -317,7 +352,20 @@ void mp_stop(void) {
     if (!atomic_exchange(&M.run, 0)) return;
     pthread_join(M.th, NULL);
 }
-void mp_set_local(const mp_local_state *st) { pthread_mutex_lock(&M.mu); M.local = *st; M.have_local = 1; pthread_mutex_unlock(&M.mu); }
+// Our state's time: the game's frames come at an even beat, the calls less evenly; the stamp keeps to the beat (its period followed
+// slowly) and drifts a tenth of the way to the clock each frame, starting over after a gap (a load, a pause)
+void mp_set_local(const mp_local_state *st) {
+    pthread_mutex_lock(&M.mu);
+    M.local = *st; M.have_local = 1;
+    double t = now_ms(), dt = t - M.local_raw;
+    if (M.local_t > 0 && dt > 4 && dt < 70) {
+        M.frame_ms += (dt - M.frame_ms) * 0.05;
+        double pred = M.local_t + M.frame_ms, s = pred + (t - pred) * 0.1;
+        M.local_t = fabs(t - s) > 40 ? t : s;
+    } else { M.local_t = t; if (!(M.frame_ms > 4)) M.frame_ms = 1000.0 / 60; }
+    M.local_raw = t;
+    pthread_mutex_unlock(&M.mu);
+}
 void mp_status(mp_status_t *out) { pthread_mutex_lock(&M.mu); *out = M.st; pthread_mutex_unlock(&M.mu); }
 void mp_rename(const char *name) {
     pthread_mutex_lock(&M.mu);
@@ -345,31 +393,29 @@ int mp_get_remote(mp_remote *out, int max) {
     if (M.snap_count) {
         double render = now_ms() + M.clock_offset - M.cfg.interp_delay_ms;   // server time we draw
         const Snap *newest = &M.snaps[(M.snap_head + M.snap_count - 1) % SNAPS];
-        // the two snapshots around the render time (by their server stamps)
-        const Snap *a = NULL, *b = NULL;
-        for (int i = M.snap_count - 1; i >= 0; i--) {
-            const Snap *s = &M.snaps[(M.snap_head + i) % SNAPS];
-            if ((double)s->t_srv <= render) { a = s; b = i + 1 < M.snap_count ? &M.snaps[(M.snap_head + i + 1) % SNAPS] : NULL; break; }
-        }
-        for (int i = 0; i < newest->n && n < max; i++) {   // the newest snapshot says who is near, nearest first
+        for (int i = 0; i < newest->n && n < max; i++) {   // the newest snapshot says who is near, nearest first (and their flags, tunic, hearts)
             mp_remote p = newest->p[i];
-            const mp_remote *pa = NULL, *pb = NULL;
-            if (a) for (int j = 0; j < a->n; j++) if (a->p[j].id == p.id) { pa = &a->p[j]; break; }
-            if (b) for (int j = 0; j < b->n; j++) if (b->p[j].id == p.id) { pb = &b->p[j]; break; }
-            if (pa && pb && b->t_srv > a->t_srv) {
-                float f = (float)((render - a->t_srv) / (double)(b->t_srv - a->t_srv)); if (f < 0) f = 0; if (f > 1) f = 1;
-                p.x = pa->x + (pb->x - pa->x) * f; p.y = pa->y + (pb->y - pa->y) * f; p.z = pa->z + (pb->z - pa->z) * f;
-                p.yaw = (uint16_t)lrintf(lerp_angle16(pa->yaw, pb->yaw, f)); p.anim = f < 0.5f ? pa->anim : pb->anim;
-            } else if (pa && !b) {
-                // past the newest: carry on along the last step for at most 150 ms
-                const Snap *prev = M.snap_count >= 2 ? &M.snaps[(M.snap_head + M.snap_count - 2) % SNAPS] : NULL;
-                const mp_remote *pp = NULL;
-                if (prev) for (int j = 0; j < prev->n; j++) if (prev->p[j].id == p.id) { pp = &prev->p[j]; break; }
-                double over = render - a->t_srv; if (over > 150) over = 150;
-                if (pp && a->t_srv > prev->t_srv) {
-                    float f = (float)(over / (double)(a->t_srv - prev->t_srv));
-                    p.x = pa->x + (pa->x - pp->x) * f; p.y = pa->y + (pa->y - pp->y) * f; p.z = pa->z + (pa->z - pp->z) * f;
-                } else { p.x = pa->x; p.y = pa->y; p.z = pa->z; }
+            const Track *tr = track_find(p.id);
+            if (tr && tr->n) {
+                const Sample *a = NULL, *b = NULL, *prev = NULL;
+                for (int k = tr->n - 1; k >= 0; k--) {   // the two samples around the render time, by the times the player was there
+                    const Sample *s = &tr->s[(tr->head + k) % TRACK_N];
+                    if (s->ts <= render) { a = s; b = k + 1 < tr->n ? &tr->s[(tr->head + k + 1) % TRACK_N] : NULL; prev = k > 0 ? &tr->s[(tr->head + k - 1) % TRACK_N] : NULL; break; }
+                }
+                if (a && b && b->ts > a->ts) {
+                    float f = (float)((render - a->ts) / (b->ts - a->ts)); if (f < 0) f = 0; if (f > 1) f = 1;
+                    p.x = a->p.x + (b->p.x - a->p.x) * f; p.y = a->p.y + (b->p.y - a->p.y) * f; p.z = a->p.z + (b->p.z - a->p.z) * f;
+                    p.yaw = (uint16_t)lrintf(lerp_angle16(a->p.yaw, b->p.yaw, f)); p.anim = f < 0.5f ? a->p.anim : b->p.anim;
+                } else if (a) {   // past their newest: on along their last step for at most 150 ms, then held
+                    double over = render - a->ts; if (over > 150) over = 150;
+                    if (prev && a->ts > prev->ts) {
+                        float f = (float)(over / (a->ts - prev->ts));
+                        p.x = a->p.x + (a->p.x - prev->p.x) * f; p.y = a->p.y + (a->p.y - prev->p.y) * f; p.z = a->p.z + (a->p.z - prev->p.z) * f;
+                    } else { p.x = a->p.x; p.y = a->p.y; p.z = a->p.z; }
+                    p.yaw = a->p.yaw; p.anim = a->p.anim;
+                } else {   // all of their track is still ahead of the render time (just in view): their oldest
+                    const Sample *o = &tr->s[tr->head]; p.x = o->p.x; p.y = o->p.y; p.z = o->p.z; p.yaw = o->p.yaw; p.anim = o->p.anim;
+                }
             }
             memcpy(p.name, NAMES[p.id], MP_NAME_MAX);
             out[n++] = p;

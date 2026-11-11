@@ -212,7 +212,8 @@ function kick(s, reason) {
 // ---------------------------------------------------------------- a player's packets
 function onState(r, s) {
   const seq = r.u32(), ackSnap = r.u32(), ackSrvEv = r.u32();
-  const st = { scene: r.u32(), x: r.f32(), y: r.f32(), z: r.f32(), yaw: r.u16(), anim: r.u16(), flags: r.u8(), hp: r.u8(), maxHp: r.u8(), equip: r.u8(), t: now() };
+  const st = { scene: r.u32(), x: r.f32(), y: r.f32(), z: r.f32(), yaw: r.u16(), anim: r.u16(), flags: r.u8(), hp: r.u8(), maxHp: r.u8(), equip: r.u8() };
+  st.t = now() - Math.min(r.u16(), 1000);   // when the player was there: now, less the position's age as it left the game (ageMs)
   const events = r.events();
   s.lastHeard = now(); s.gone = false;
   if (ackSnap > s.ackSnap) s.ackSnap = ackSnap;
@@ -456,7 +457,8 @@ function sendSnapshot(s, others, nearShots) {
     if (o.dead) flags |= P.PF.DEAD;
     if (t < o.invulnUntil) flags |= P.PF.INVULN;
     w.u16(o.id).f32(st.x).f32(st.y).f32(st.z).u16(st.yaw).u16(st.anim).u8(flags)
-      .u8(st.maxHp ? Math.min(255, Math.round(255 * st.hp / st.maxHp)) : 255).u8(o.outfit).u8(st.equip);
+      .u8(st.maxHp ? Math.min(255, Math.round(255 * st.hp / st.maxHp)) : 255).u8(o.outfit).u8(st.equip)
+      .u16(Math.max(0, Math.min(65535, Math.round(t - (st.t ?? t)))));   // ageMs: how long before this snapshot the player was there
   }
   sendRaw(w.done(), s.port, s.ip);
 }
