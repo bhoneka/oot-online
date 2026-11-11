@@ -2,7 +2,8 @@
 # What it carries (its payload): a standalone Python with the build's Python packages, the parts of the game app that need a compiler (nxnative's Mac
 # host with OoT Online's module, the app's launcher, the shader compile tool), built here from nxnative at patches/NXNATIVE_COMMIT with patches/
 # applied, and OoT Online's own scripts. Nothing from the game: the player's Mac downloads nxnative's source itself and builds the game from their dump.
-#   Actions → installer → Run workflow (version: 1.2.0) builds and publishes release installer-v1.2.0; without a version it only builds (an artifact).
+#   A tag installer-v1.2.0 (git push origin installer-v1.2.0), or Actions → installer → Run workflow with version 1.2.0, builds and publishes release
+#   installer-v1.2.0; a push to the installer branch, or Run workflow without a version, only builds it (an artifact).
 name: installer
 on:
   workflow_dispatch:
@@ -13,6 +14,7 @@ on:
         default: ''
   push:
     branches: [installer]   # test builds of the installer (an artifact, no release)
+    tags: ['installer-v*']  # a release
 permissions:
   contents: write
 env:
@@ -69,7 +71,8 @@ jobs:
           EOF
       - name: The installer app
         run: |
-          V="${{ inputs.version }}"; [ -n "$V" ] || V="0.0.0-${GITHUB_SHA::7}"
+          V="${{ inputs.version }}"; [[ -n "$V" || "$GITHUB_REF" != refs/tags/installer-v* ]] || V="${GITHUB_REF#refs/tags/installer-v}"
+          [ -n "$V" ] || V="0.0.0-${GITHUB_SHA::7}"
           echo "VERSION=$V" >> "$GITHUB_ENV"
           zsh installer/build_app.sh payload dist "$V"
           ditto -c -k --keepParent "dist/Install OoT Online.app" "dist/Install-OoT-Online.zip"
@@ -87,7 +90,7 @@ jobs:
           name: Install-OoT-Online
           path: dist/Install-OoT-Online.zip
       - name: Release
-        if: inputs.version != ''
+        if: inputs.version != '' || startsWith(github.ref, 'refs/tags/installer-v')
         env:
           GH_TOKEN: ${{ github.token }}
         run: |

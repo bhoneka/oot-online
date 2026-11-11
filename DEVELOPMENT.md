@@ -26,6 +26,8 @@ repository; the code says where each address came from.
 
 ## Playing (each player)
 
+Players use the installer app (README, "Install"; how it works: "The installer" below). Developers can build with Xcode instead:
+
 ```bash
 zsh setup/ootonline-setup.sh "/path/to/your game.nup" <server address>
 ```
@@ -60,12 +62,14 @@ On a rented Linux server (about 5 a month): `zsh deploy/push.sh root@<its addres
 
 ## The native game
 
-The setup builds the game with nxnative at the commit in `patches/NXNATIVE_COMMIT`, with three differences from upstream,
-all in `patches/`:
+The setup builds the game with nxnative at the commit in `patches/NXNATIVE_COMMIT`, with four differences from upstream,
+all in `patches/` (applied in this order, then `tools/integrate_nxnative.py`):
 - **macOS 26:** nxnative's shader translator was built for macOS 27 and crashes at start on macOS 26 (it calls
   `pipe2()`, which macOS 26 doesn't have). The patch runs the same translator's Intel half under Rosetta.
 - **Xcode 27.1:** nxnative's shaders were tested with Xcode 27.2's Metal compiler; the build uses 27.1's with
   `--allow-other-metal`. The App Store has 27.2.
+- **No Xcode** (`nxnative-no-xcode.patch`): `build_ipa_from_nsp.py --no-xcode` compiles the shaders with macOS's own Metal
+  compiler and packs a prebuilt host and launcher (see "The installer"). Without `--no-xcode` it builds as before.
 - **60 fps in the world** (`nxnative-frame-step-gpu-span.patch`): nxnative's frame step holds a frame for 2 or 3 vsyncs
   (30 or 20 fps) when it thinks 60 cannot hold, judging by the frame's GPU time. It read that time as the sum of the frame's
   command buffers' times, and on an M5 Max (macOS 26.7) the buffers overlap: in Hyrule Field the sum is about 33 ms while
@@ -77,6 +81,50 @@ all in `patches/`:
 
 The first time the game shows a place it builds that place's render pipelines (a few seconds of slower frames, once per
 place); they are kept for the next time.
+
+## The installer (no Xcode)
+
+Players install with **Install OoT Online.app** (`installer/`), which GitHub Actions builds (`.github/workflows/installer.yml`)
+and publishes as a release (`installer-v<version>`; the website and README link `releases/latest/download/Install-OoT-Online.zip`).
+It asks for the player's `.nup` and builds `~/Applications/Ocarina of Time Online.app` with no Xcode, Homebrew or Terminal:
+
+- **The shaders without Xcode.** macOS has its own Metal compiler, the one every app compiles source with (`newLibraryWithSource:`).
+  It takes the offline build's options as compiler arguments (`MTLCompileOptions` `additionalCompilerArguments`: `-O1 -fwrapv
+  -fbracket-depth 1024 -discard-value-names`, and `preserveInvariance`), and the library it makes can be written to a file (the
+  library's `serializeToURL:error:`). Neither is in Metal's headers: the tool checks both first (`dmsh_rtc --check`) and the build
+  stops with that message on a macOS without them. `nxnative-no-xcode.patch` makes this nxnative's `DMSH_METAL=runtime`:
+  `dm/gfx/tools/dmsh_rtc.m` (one process for the whole build, compiling as many shaders at once as the Mac has cores) and
+  `dmsh_rtc.py` (its client, and `canonical`, which rewrites each library into the layout Xcode's `metallib` writes: without the
+  run-time compiler's reflection blocks, and with metadata sizes counted the offline way). The host, the library image and
+  `dmsh_side.cut` (the side libraries) get what an Xcode build gives them; nothing in the host changed.
+- **Checked on Ocarina of Time's shaders** (432 spread over the 42,848, against the tested Xcode 27.1 library): all compile; their
+  LLVM code is Xcode's but for a few loads re-read after a `discard` (macOS 26.7's compiler is metalfe-32023.886, Xcode 27.1's
+  32023.921); the functions, their types and vertex inputs are the same as Metal reports them; the 41 compute shaders' pipelines are
+  the same (threads per group, threadgroup memory, execution width); compiling twice gives the same bytes; `dmsh_side.cut` splits
+  them and Metal loads the pieces. The three shaders the offline flags exist for (mesh 35785cddc971290c, `-fwrapv`; compute
+  1f78730053feb036 and e172bd7ec218ab8e, the bracket depth) compile with them.
+- **Prebuilt parts.** `dm/mac/prebuild.py` (in the patch) builds the host for the profile with OoT Online's module, the app's
+  launcher and `dmsh_rtc`, and writes `manifest.json` (chain version, the profile's `game_profile.h`, minimum macOS, hashes).
+  `--no-xcode --prebuilt <dir>` packs them: it checks the host was built for this profile and chain version (a derived profile, the
+  base game without the update, differs only in the build rows, which the host reads for the module list and the display version),
+  reads the minimum macOS from the host itself (no `otool`), runs no `git` outside a checkout, decompresses with Python's
+  `compression.zstd` (no `zstd` command) and asks `dmsh_rtc --arch` for the GPU. No pipeline archive is made offline (that is
+  Xcode's `metal-tt`): the installer runs the host's prebuild (`DM_PSO_PREBUILD=tool`) into the player's `pso_archive` instead.
+- **On the player's Mac** (`setup/install.py`, run by the app with the standalone Python 3.14 it carries): nxnative is downloaded
+  at `patches/NXNATIVE_COMMIT` from GitHub (the commit's archive, no git), the four patches applied with `/usr/bin/patch`,
+  `integrate_nxnative.py` run, and the chain version checked against the prebuilt host's; then nxnative's build (`--no-xcode`),
+  the fonts, the stand-ins and the pipeline prebuild. Every tool it starts gets `PATH=/usr/bin:/bin:/usr/sbin:/sbin` and
+  `DEVELOPER_DIR=/var/empty/no-xcode`, so anything that reached for Xcode fails with an error instead of offering to install the
+  Command Line Tools. The shader translator still runs as Intel code on macOS 26 (`nxnative-mac26-translator.patch`): the
+  installer asks macOS to install Rosetta when it is missing. The app copies its payload out of itself first
+  (`~/Library/Application Support/OoT Online/installer/<payload id>`, `ditto --noqtn`), so nothing runs from the downloaded,
+  quarantined bundle.
+- **Nothing from the game is in the installer:** Python and its packages, the prebuilt binaries (compiled from nxnative and
+  `client/`), OoT Online's scripts and the licenses (`payload/licenses`; zbic is GPLv2, its source rides along). nxnative's own
+  game tables come from nxnative's GitHub on the player's Mac.
+- **A release:** Actions → installer → Run workflow with a version (e.g. `1.0.0`): it builds on GitHub's `xcode-27` runner
+  (Xcode 27.1, the one the tested host was built with) and publishes `installer-v1.0.0` with `Install-OoT-Online.zip`. Pushes to
+  the `installer` branch build it without releasing (an artifact).
 
 ## Folders
 
@@ -90,4 +138,6 @@ place); they are kept for the next time.
   `OOT_WORK` / `OOT_VER` run another build of the game. `tools/frames_stats.py` reads a run's per-frame timing (`DM_NVN_TSV`).
 - `tools/locked_build.sh` (the app's build) and `tools/locked_job.sh` (any heavy job) hold the shared game-run lock, so no test
   of either project runs at the same time.
-- `setup/` the player setup. `deploy/` the server setup. `docs/` the website and the installer.
+- `installer/` the installer app (`InstallOoTOnline.swift`, `build_app.sh`, `make_icon.swift`); `setup/install.py` what it runs;
+  `.github/workflows/installer.yml` builds and releases it.
+- `setup/ootonline-setup.sh` the developers' setup (Xcode). `deploy/` the server setup. `docs/` the website.

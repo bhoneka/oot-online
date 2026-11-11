@@ -41,6 +41,13 @@ enum Phase { case welcome, running, done, failed }
 
 final class Model: ObservableObject {
     static let shared = Model()
+    init() {
+        if let s = Model.testEnv["OOT_INSTALLER_SERVER"] { server = s }
+        if let f = Model.testEnv["OOT_INSTALLER_NUP"] {   // a test: this file, and the build starts once the window is up
+            nup = URL(fileURLWithPath: f); nupSize = "test"
+            DispatchQueue.main.async { self.start() }
+        }
+    }
     @Published var state: Phase = .welcome
     @Published var nup: URL?
     @Published var nupSize = ""
@@ -62,7 +69,7 @@ final class Model: ObservableObject {
     var buffer = Data()
     var sleepAssertion: IOPMAssertionID = 0
     var timer: Timer?
-    let support = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/OoT Online")
+    let support = Model.testEnv["OOT_INSTALLER_SUPPORT"].map { URL(fileURLWithPath: $0) } ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/OoT Online")
 
     func choose() {
         let p = NSOpenPanel()
@@ -124,10 +131,19 @@ final class Model: ObservableObject {
         }
     }
 
+    // Test runs (the app's launch environment): OOT_INSTALLER_NUP=<file> picks the game file and starts at once; OOT_INSTALLER_APP, _WORK, _DATA and _SUPPORT
+    // put the game app, the build folder, the game's data folder and OoT Online's folder elsewhere (install.py --app, --work, --data, --support), so a test leaves a
+    // player's own app and saves alone; OOT_INSTALLER_SERVER is the server
+    static let testEnv = ProcessInfo.processInfo.environment
+    func testArgs() -> [String] {
+        [("OOT_INSTALLER_APP", "--app"), ("OOT_INSTALLER_WORK", "--work"), ("OOT_INSTALLER_DATA", "--data"), ("OOT_INSTALLER_SUPPORT", "--support")]
+            .flatMap { k, opt in Model.testEnv[k].map { [opt, $0] } ?? [] }
+    }
+
     func launch(payload p: URL, nup: URL, server: String) {
         let proc = Process()
         proc.executableURL = p.appendingPathComponent("python/bin/python3")
-        proc.arguments = ["-I", "-B", p.appendingPathComponent("oot-online/setup/install.py").path, "--nup", nup.path, "--json"] + (server.isEmpty ? [] : ["--server", server])
+        proc.arguments = ["-I", "-B", p.appendingPathComponent("oot-online/setup/install.py").path, "--nup", nup.path, "--json"] + (server.isEmpty ? [] : ["--server", server]) + testArgs()
         proc.environment = ["HOME": NSHomeDirectory(), "USER": NSUserName(), "LOGNAME": NSUserName(), "TMPDIR": NSTemporaryDirectory(),
                             "PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "DEVELOPER_DIR": "/var/empty/no-xcode", "LANG": "en_US.UTF-8", "LC_ALL": "en_US.UTF-8"]
         let out = Pipe(), err = Pipe()
