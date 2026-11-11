@@ -39,7 +39,8 @@ h2 { font-family: Cinzel, Georgia, serif; color: var(--gold); font-size: 30px; m
 p { margin: 0 0 14px; }
 .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin-top: 18px; }
 figure { margin: 0; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
-figure img { display: block; width: 100%; aspect-ratio: 16 / 9; object-fit: cover; }
+figure img, figure video { display: block; width: 100%; aspect-ratio: 16 / 9; object-fit: cover; }
+figure.wide { margin-top: 18px; }
 figcaption { padding: 10px 12px; font-size: 14px; color: var(--mute); }
 .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 20px 22px; }
 ul { margin: 0 0 14px; padding-left: 22px; }
@@ -80,6 +81,8 @@ footer { border-top: 1px solid var(--line); margin-top: 48px; padding: 24px 20px
     <p>OoT Online puts everyone who plays into one Hyrule Field. It runs The Legend of Zelda: Ocarina of Time for Nintendo
       Switch 2 natively on Macs with an Apple chip, at 60 fps, and adds the other players: each one is a Link of their own age
       walking with Link's own animations. The lobby, the notices and the prompts are the game's own menus.</p>
+    <figure class="wide"><video autoplay muted loop playsinline preload="metadata" poster="img/links.jpg"><source src="img/links.mp4" type="video/mp4"></video>
+      <figcaption>Six players at the Castle Town drawbridge: young and adult Links in Kokiri, Goron and Zora tunics.</figcaption></figure>
     <div class="grid">
       <figure><img src="img/lobby.jpg" alt="The lobby in the game's own menu: Play, Tunic, Name" loading="lazy"><figcaption>The lobby is the game's own menu: Play, Tunic, Name.</figcaption></figure>
       <figure><img src="img/aim.jpg" alt="Aiming the slingshot at another player" loading="lazy"><figcaption>Your bow or slingshot is on ZR. Aim, let go.</figcaption></figure>

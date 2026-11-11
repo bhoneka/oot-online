@@ -44,7 +44,8 @@ typedef struct {
              f_decided, f_queue_request, f_arg_ctor, f_comp_request, f_link_reset, f_cur_event, f_getstring64, f_setint, f_layer, f_w2s,
              f_watch_take, f_watch_free_failed, f_watch_cancel;
     uint64_t g_pouch, g_playing_info,   // the ranged weapon (re/ITEMS.md): game::PouchMgr, PlayingInfo
-             f_pouch_push, f_pouch_actor_info, f_pouch_category, f_get_assigned, f_set_assigned, f_setbool, f_getint;
+             f_pouch_push, f_pouch_actor_info, f_pouch_category, f_get_assigned, f_set_assigned, f_setbool, f_getint,
+             f_req_equip, f_armor_default;   // a stand-in's tunic (the game's equipFromGameData path for slot 8)
 } oot_build;
 static const oot_build BUILDS[] = {
     { "e0f3ccfaf50065ae4ea01eb5aeb13b1a", 0xe0f3ccfau,   // v131072 (the update)
@@ -53,7 +54,8 @@ static const oot_build BUILDS[] = {
       0x3bc7230, 0x3bc7240, 0xa687f0, 0xbad3c0, 0x377af70, 0x377afb0, 0xa67d30, 0x43d870, 0x2d2d90, 0x86ffc0, 0xa76360,
       0x3773090, 0xfe6110, 0xd79f10, 0xf61460, 0x20b6f0, 0xbcc0b0, 0xcb0ea0, 0x163b70, 0x17ce50, 0x29d40d0,
       0x36fbd0, 0x36fde0, 0xb2fa30,
-      0x4e78e28, 0x4e7cfa8, 0x110d570, 0x58ed10, 0x13fdd0, 0x17b6e0, 0x1211c00, 0x682b20, 0x837070 },
+      0x4e78e28, 0x4e7cfa8, 0x110d570, 0x58ed10, 0x13fdd0, 0x17b6e0, 0x1211c00, 0x682b20, 0x837070,
+      0x1013f20, 0x10aceb0 },
     { "33fa6c2c23848282a77e8b88a0a93f48", 0x33fa6c2cu,   // v65536 (the base game, no update)
       0x4e271e8, 0x4e21428, 0x4e13e48, 0x4e21570, 0x4e140b8, 0x4e27e80, 0x4e243e0, 0x4e24c48, 0x4bbc4d8, 0x49101f8,
       0x27e8e0, 0xd01360, 0x2da26f0, 0x97feb0, 0xc35730, 0xc35500, 0xc4fa0, 0x2b63a0, 0xb4ac90,
@@ -62,7 +64,8 @@ static const oot_build BUILDS[] = {
       0x97d000, 0x97d210, 0xa1f060,
       // the item functions, mapped 2026-11-11 with re/tools/port_v65536.py's matchers: push 0x11378f0 by 9 calls from 3 matched callers
       // (its body changed), the others by body or callers; PouchMgr's +0x3bb0 / +0x3bc0 checked in its init and readers
-      0x4e08a30, 0x4e0cb60, 0x11378f0, 0x473490, 0x47aaf0, 0x59be30, 0xa01f40, 0x691500, 0xba7d00 },
+      0x4e08a30, 0x4e0cb60, 0x11378f0, 0x473490, 0x47aaf0, 0x59be30, 0xa01f40, 0x691500, 0xba7d00,
+      0xb15580, 0x107d9a0 },   // (the two equip calls: by their callers, 746/747 and 408/422 words equal)
 };
 static const oot_build *B = &BUILDS[0];
 // the names the code below uses, read from the running build's table
@@ -111,6 +114,8 @@ static const oot_build *B = &BUILDS[0];
 #define F_SET_ASSIGNED (B->f_set_assigned)
 #define F_SETBOOL (B->f_setbool)
 #define F_GETINT (B->f_getint)
+#define F_REQ_EQUIP (B->f_req_equip)
+#define F_ARMOR_DEFAULT (B->f_armor_default)
 #define F_WATCH_CANCEL (B->f_watch_cancel)   // the running build's addresses (ready() picks it; until then the update's, never used)
 static int g_ok = -1;                    // 1: a build the map knows
 static double now_s(void);
@@ -638,7 +643,7 @@ static void test_tick(int ui_ctx) {   // ui_ctx: the UI tick (the frame gate: no
 // area forgets them without deleting. Damage goes into LifeComponent's pending counter; a hit that would end Link is a
 // heal + warp to the server's spawn instead of the game's Game Over (deaths from the world still take the game's own path).
 #define MAX_PUPPETS 16
-typedef struct { uint16_t id; uint64_t watch; uint64_t actor; int outfit, child; double asked; int anim; char name[32]; uint8_t arg[0xa0] __attribute__((aligned(16)));
+typedef struct { uint16_t id; uint64_t watch; uint64_t actor; int outfit, child; double asked; int anim; char name[32]; int dressed; double taken_at; uint8_t arg[0xa0] __attribute__((aligned(16)));
                  uint8_t bb[0x1918] __attribute__((aligned(16))); } Puppet;
 static Puppet g_pup[MAX_PUPPETS];
 static uint32_t g_pup_scene;
@@ -683,6 +688,21 @@ static void puppet_request(Puppet *p, const mp_remote *o, int child) {
     p->id = o->id; p->actor = 0; p->outfit = o->outfit; p->child = child; p->asked = now_s(); p->anim = -1; snprintf(p->name, sizeof p->name, "%s", o->name);
     if (!ok) { MP_GAME_LOG("stand-in for #%u not requested (result %u)", o->id, result); p->id = 0; }
 }
+// An adult stand-in's tunic. The stand-in is the inventory screen's Link, which dresses itself from the player's own equipment
+// (runs/vid2: every adult stand-in wore the watcher's Kokiri tunic; the blackboard override given at creation is not read for it), so
+// it is dressed the way the game's own equipFromGameData does slot 8 (main+0x2df7a4c): the Kokiri tunic (Armor_Adult_Normal)
+// through the default-armor call, any other through requestCreateEquipment(eu, 8, &name, 0, 1)
+typedef void (*f_req_equip)(void *eu, uint32_t slot, const char **name, int32_t a, bool b);
+typedef void (*f_armor_default)(void *eu, bool a, bool b);
+static void puppet_dress(Puppet *p) {
+    p->dressed = 1;
+    if (!F_REQ_EQUIP) return;
+    uint64_t eu = comp(p->actor, C_EQUIP); if (!eu) return;
+    const char *armor = ARMOR[p->outfit % 3];
+    if (p->outfit % 3 == 0) ((f_armor_default)fn(F_ARMOR_DEFAULT))((void *)eu, true, false);
+    else ((f_req_equip)fn(F_REQ_EQUIP))((void *)eu, 8, &armor, 0, true);
+    MP_GAME_LOG("stand-in for %s dressed: %s", p->name, armor);
+}
 static void puppets_update(uint64_t me, const mp_remote *o, int n, uint32_t scene) {
     if (scene != g_pup_scene) {   // a new area: the game deleted the stand-ins; requests still pending are cancelled (they would leak the engine's watchers)
         for (int i = 0; i < MAX_PUPPETS; i++) watch_cancel(&g_pup[i].watch);
@@ -710,7 +730,7 @@ static void puppets_update(uint64_t me, const mp_remote *o, int n, uint32_t scen
         if (!p->actor) {
             if (p->watch) {
                 uint64_t a = watch_take(&p->watch);
-                if (a) { p->actor = a; MP_GAME_LOG("stand-in for %s (#%u) taken", p->name, p->id); }
+                if (a) { p->actor = a; p->taken_at = t; p->dressed = 0; MP_GAME_LOG("stand-in for %s (#%u) taken", p->name, p->id); }
                 else if (!p->watch) p->id = 0;                                   // the game said no (freed): asked again next frame
                 else if (t - p->asked > 10) { watch_cancel(&p->watch); p->id = 0; }   // never came: cancelled, asked again
             } else p->id = 0;
@@ -722,6 +742,7 @@ static void puppets_update(uint64_t me, const mp_remote *o, int n, uint32_t scen
         float m[12]; yaw_matrix(m, o[j].x, o[j].y, o[j].z, o[j].yaw);
         ((f_force_set_matrix)fn(F_FORCE_SET_MATRIX))((void *)p->actor, m, false);
         if (p->anim != o[j].anim && o[j].anim < N_ANIM) { as_play(p->actor, ANIM[o[j].anim]); p->anim = o[j].anim; }
+        if (!p->child && !p->dressed && t - p->taken_at > 0.3) puppet_dress(p);
     }
 }
 

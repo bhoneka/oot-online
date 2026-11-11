@@ -20,5 +20,16 @@ if command -v ufw >/dev/null 2>&1; then
   ufw allow 4696/tcp >/dev/null
   ufw --force enable >/dev/null
 fi
+# HTTPS for the status page, so the website (an https page) can show the player count: Caddy with a free name that points at this
+# box's own address (<a-b-c-d>.sslip.io), certificate from Let's Encrypt by itself. STATUS_HOST=<name> for a domain of your own
+IP=$(curl -fsS -4 https://ifconfig.me 2>/dev/null || hostname -I | awk '{print $1}')
+HOSTNAME_STATUS=${STATUS_HOST:-$(echo "$IP" | tr . -).sslip.io}
+if ! command -v caddy >/dev/null 2>&1; then apt-get update -qq; apt-get install -y -qq caddy >/dev/null 2>&1 || true; fi
+if command -v caddy >/dev/null 2>&1; then
+  printf '%s {\n  reverse_proxy 127.0.0.1:4696\n}\n' "$HOSTNAME_STATUS" > /etc/caddy/Caddyfile
+  systemctl enable caddy >/dev/null 2>&1 || true; systemctl restart caddy
+  if command -v ufw >/dev/null 2>&1; then ufw allow 80/tcp >/dev/null; ufw allow 443/tcp >/dev/null; fi
+  echo "status over HTTPS: https://$HOSTNAME_STATUS/"
+fi
 echo "running: $(systemctl is-active oot-online)"
-echo "players join this server's address (the launcher's Server field); its status page is http://<address>:4696/"
+echo "players join $IP:4697; its status page is http://$IP:4696/"
