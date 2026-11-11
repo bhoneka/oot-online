@@ -396,6 +396,8 @@ static void travel_tick(void) {   // world tick, once a frame (re/AREA_CHANGE.md
 // DM_MP_FIELD_AGE=adult / child (tests only, on a test run's own save): that age's Field, which makes Link that age when he arrives
 // (re/AREA_CHANGE.md: the banc's IsChildWhenChangeBanc switches him); unset: his own age's
 static const char *field_banc(void) {
+    static env_switch b = { .name = "DM_MP_FIELD_BANC" }; const char *eb = env_now(&b);
+    if (eb[0]) return eb;   // (tests: another area for footage, e.g. KokiriForest_Child with DM_MP_FIELD_POS=ReturnFromDreamWorld)
     static env_switch s = { .name = "DM_MP_FIELD_AGE" }; const char *e = env_now(&s);
     if (!strcmp(e, "adult")) return "HyruleField_Adult";
     if (!strcmp(e, "child")) return "HyruleField_Child";
@@ -659,6 +661,7 @@ typedef struct { uint16_t id; uint64_t watch; uint64_t actor; int outfit, child;
                  float lx, lz, spd; uint64_t lf; double lt; int moving, bb_said;   // puppet_speed: the last position, when, the speed it gives (m/s, smoothed)
                  double check_t; int replays;   // puppet_check: when its sequence was last checked, how often a command had to be played again
                  uint64_t navi_watch, navi; int navi_anim; uint8_t navi_arg[0xa0] __attribute__((aligned(16)));   // navi_tick: its own fairy
+                 int weapon_on;   // its bow / slingshot made (puppet_weapon)
                  uint8_t arg[0xa0] __attribute__((aligned(16)));
                  uint8_t bb[0x1918] __attribute__((aligned(16))); } Puppet;
 static Puppet g_pup[MAX_PUPPETS];
@@ -793,6 +796,31 @@ static void bb_set_b(uint64_t bb, int i, int v) {
     uint64_t a = rp(bb + 0x30), c = rp(bb + 0x60); if (!a || !c || (uint32_t)i >= r32(a) || (uint32_t)i >= r32(c)) return;
     *(volatile uint8_t *)(a + 4 + i) = (uint8_t)(v != 0); volatile uint8_t *k = (volatile uint8_t *)(c + 4 + i); *k = (uint8_t)(*k + 1);
 }
+static void bb_set_i(uint64_t bb, int i, int32_t v) {   // ints at +0x18, their counts at +0x48
+    uint64_t a = rp(bb + 0x18), c = rp(bb + 0x48); if (!a || !c || (uint32_t)i >= r32(a) || (uint32_t)i >= r32(c)) return;
+    *(volatile int32_t *)(a + 4 + 4ull * i) = v; volatile uint8_t *k = (volatile uint8_t *)(c + 4 + i); *k = (uint8_t)(*k + 1);
+}
+// Link's aim reads his blackboard too (Player_Adult.root.asb): BowCharge and BowChargeUpper choose the slingshot's clips or the bow's by
+// IsChild (bool 11), then by IsBowCameraInvalidSideOfs (bool 42) and ArrowType (int 5). Clips the actor doesn't have play nothing: an adult
+// stand-in whose IsChild said young stood still while its arrow flew (runs/vid19). Its age is set when its blackboard first appears, and
+// with IsAiming (bool 9) and BattleMode (bool 6) while it aims. DM_MP_AIMBB=0 / odd (tests: none / only odd player ids)
+// Link's own while he aims the slingshot (runs/aimt1): WeaponType (int 1) 4, UsingItem (int 23) the item (the item enum: SlingShot 4,
+// Bow 30; -1 none), BattleMode, IsAiming and IsCaution (bool 26) on
+enum { BBB_BATTLE = 6, BBB_AIMING = 9, BBB_CHILD = 11, BBB_CAUTION = 26, BBB_BOWCAM = 42, BBI_WEAPON = 1, BBI_POSTURE = 3, BBI_ARROW = 5, BBI_USING = 23 };
+static int aim_bb_on(const Puppet *p) {
+    static env_switch e = { .name = "DM_MP_AIMBB" }; const char *v = env_now(&e);
+    if (!strcmp(v, "0")) return 0;
+    if (!strcmp(v, "odd")) return (p->id & 1) != 0;
+    return 1;
+}
+static void puppet_aim_bb(Puppet *p, uint64_t bb, int aiming) {
+    if (!bb || !aim_bb_on(p)) return;
+    bb_set_b(bb, BBB_CHILD, p->child); bb_set_b(bb, BBB_BOWCAM, 0); bb_set_i(bb, BBI_ARROW, 0); bb_set_i(bb, BBI_POSTURE, 0);
+    if (aiming >= 0) {
+        bb_set_b(bb, BBB_AIMING, aiming); bb_set_b(bb, BBB_BATTLE, aiming); bb_set_b(bb, BBB_CAUTION, aiming);
+        bb_set_i(bb, BBI_WEAPON, aiming ? 4 : 0); bb_set_i(bb, BBI_USING, aiming ? (p->child ? 4 : 30) : -1);
+    }
+}
 static void puppet_speed(Puppet *p, float x, float z) {
     static int one = -1; if (one < 0) one = getenv("DM_FSTEP_ONE") && atoi(getenv("DM_FSTEP_ONE"));
     uint64_t f = dm_guest_frame(); double t = now_s();
@@ -810,7 +838,7 @@ static void puppet_speed(Puppet *p, float x, float z) {
         if (!p->bb_said) { p->bb_said = 1; MP_GAME_LOG("[RED] stand-in for %s: no animation blackboard of Link's shape (floats %#llx, bools %#llx): its legs won't follow its speed", p->name, (unsigned long long)fa, (unsigned long long)ba); }
         return;
     }
-    if (!p->bb_said) { p->bb_said = 1; MP_GAME_LOG("stand-in for %s: its walk / run follows its speed (blackboard %#llx)", p->name, (unsigned long long)bb); }
+    if (!p->bb_said) { p->bb_said = 1; MP_GAME_LOG("stand-in for %s: its walk / run follows its speed (blackboard %#llx)", p->name, (unsigned long long)bb); puppet_aim_bb(p, bb, -1); }
     float full = p->child ? g_stick_full_c : g_stick_full_a, stick = p->moving ? (p->spd >= full ? 1.0f : p->spd / full) : 0;
     if (p->moving && stick < 0.25f) stick = 0.25f;
     {   // DM_MP_BBCOPY=1 (tests): our own Link's whole blackboard first (ints, bools, floats, each through its change count), so the
@@ -913,6 +941,24 @@ static void bb_dump(const char *who, uint64_t actor) {
     }
     MP_GAME_LOG("%s", line);
 }
+// Its age's ranged weapon in its hands the first time it aims, through requestCreateEquipment as the tunic is made: the slot before
+// the shield's (0 the sword, 6 the shield, 7-9 head, tunic, boots: re/REPORT.md; TOTK's bow is the slot before its shield too), with
+// the hand's equipment state (1; 2 is the back: TOTK Royale's puppets.cpp Give). Only with DM_MP_BOW_SLOT / DM_MP_BOW_STATE (tests)
+static void puppet_weapon(Puppet *p) {
+    if (p->weapon_on || !F_REQ_EQUIP) return;
+    uint64_t eu = comp(p->actor, C_EQUIP); if (!eu) return;
+    const char *w = p->child ? "Weapon_Range_SlingShot" : "Weapon_Range_Bow";
+    const char *es = getenv("DM_MP_BOW_SLOT"), *et = getenv("DM_MP_BOW_STATE");
+    if (!es || !*es) return;   // not yet for players: slots 1-4 were asked and showed nothing (runs/aim5, aimt2-4), slot 5 in the hand state crashed the game (runs/aim4)
+    // (tests: comma lists, one entry per stand-in in the order they first aim, the last repeated: DM_MP_BOW_SLOT=3,3,3,4)
+    static int nth; int k = nth++;
+    const char *q = es; for (int i = 0; i < k && strchr(q, ','); i++) q = strchr(q, ',') + 1;
+    const char *r = et && *et ? et : "1"; for (int i = 0; i < k && strchr(r, ','); i++) r = strchr(r, ',') + 1;
+    int slot = atoi(q), state = atoi(r);
+    typedef bool (*f_req_equip_ok)(void *eu, uint32_t slot, const char **name, int32_t a, bool b);   // (it says whether it asked)
+    bool asked = ((f_req_equip_ok)fn(F_REQ_EQUIP))((void *)eu, (uint32_t)slot, &w, state, true);
+    p->weapon_on = 1; MP_GAME_LOG("stand-in for %s: %s out (slot %d, state %d): %s", p->name, w, slot, state, asked ? "asked" : "refused");
+}
 static void puppets_update(uint64_t me, const mp_remote *o, int n, uint32_t scene) {
     if (scene != g_pup_scene) {   // a new area: the game deleted the stand-ins; requests still pending are cancelled (they would leak the engine's watchers)
         for (int i = 0; i < MAX_PUPPETS; i++) { watch_cancel(&g_pup[i].watch); watch_cancel(&g_pup[i].navi_watch); }
@@ -940,7 +986,7 @@ static void puppets_update(uint64_t me, const mp_remote *o, int n, uint32_t scen
         if (!p->actor) {
             if (p->watch) {
                 uint64_t a = watch_take(&p->watch);
-                if (a) { p->actor = a; p->taken_at = t; p->dressed = 0; p->lf = 0; p->spd = 0; p->moving = 0; p->bb_said = 0; p->check_t = 0; p->replays = 0; MP_GAME_LOG("stand-in for %s (#%u) taken", p->name, p->id); }
+                if (a) { p->actor = a; p->taken_at = t; p->dressed = 0; p->lf = 0; p->spd = 0; p->moving = 0; p->bb_said = 0; p->check_t = 0; p->replays = 0; p->weapon_on = 0; MP_GAME_LOG("stand-in for %s (#%u) taken", p->name, p->id); }
                 else if (!p->watch) p->id = 0;                                   // the game said no (freed): asked again next frame
                 else if (t - p->asked > 10) { watch_cancel(&p->watch); p->id = 0; }   // never came: cancelled, asked again
             } else p->id = 0;
@@ -951,8 +997,8 @@ static void puppets_update(uint64_t me, const mp_remote *o, int n, uint32_t scen
         if (ast != 4) { p->id = 0; p->actor = 0; continue; }   // gone (deleted by the game)
         float m[12]; yaw_matrix(m, o[j].x, o[j].y, o[j].z, o[j].yaw);
         ((f_force_set_matrix)fn(F_FORCE_SET_MATRIX))((void *)p->actor, m, false);
-        { static int probe = -1; static double last; if (probe < 0) probe = getenv("DM_MP_BBPROBE") && atoi(getenv("DM_MP_BBPROBE"));
-          if (probe && p == &g_pup[0] && t - last > 1.0) { last = t; bb_dump(p->name, p->actor); bb_dump("Link", me); } }   // (before our writes)
+        { static int probe = -1; static double last; if (probe < 0) probe = getenv("DM_MP_BBPROBE") ? atoi(getenv("DM_MP_BBPROBE")) : 0;
+          if (probe && p == &g_pup[0] && t - last > 1.0) { last = t; bb_dump("Link", me); for (int q = 0; q < MAX_PUPPETS; q++) if (g_pup[q].actor && (probe > 1 || q == 0)) bb_dump(g_pup[q].name, g_pup[q].actor); } }   // (before our writes; DM_MP_BBPROBE=2: every stand-in)
         puppet_speed(p, o[j].x, o[j].z);
         navi_tick(p, &o[j]);
         {   // DM_MP_PUPLOG=<file> (tests): where each stand-in is drawn every frame, to measure how smoothly others move
@@ -960,7 +1006,17 @@ static void puppets_update(uint64_t me, const mp_remote *o, int n, uint32_t scen
             if (on) { fprintf(lf, "%llu\t%.4f\t%u\t%.4f\t%.4f\t%.4f\t%u\t%u\t%.3f\n", (unsigned long long)dm_guest_frame(), now_s(), o[j].id, o[j].x, o[j].y, o[j].z, o[j].yaw, o[j].anim, p->spd); fflush(lf); }
         }
         { float lp[3] = { 0, 0, 0 }; rd(me + A_POS, lp, sizeof lp); float dx = o[j].x - lp[0], dz = o[j].z - lp[2]; puppet_check(p, t, sqrtf(dx * dx + dz * dz)); }
-        if (p->anim != o[j].anim && o[j].anim < N_ANIM && as_play_rate(p->actor, standin_cmd(o[j].anim), o[j].anim == 1 ? move_rate(p->child) : 1.0f)) {   // (not played: again next frame)
+        if (p->anim != o[j].anim && (o[j].anim == 6 || o[j].anim == 7) && as_controller(p->actor)) {
+            // the bow (young: the slingshot) out and drawn, as Link's own code does it (runs/aim1, his slots while aiming): the command on
+            // slot 0, its Upper variant on 1 and 4 (BowCharge / BowChargeUpper, BowShoot / BowShootUpper), with his aim's blackboard values
+            // (puppet_aim_bb: without them an adult stand-in stood still while its arrow flew, runs/vid19; with them it draws, runs/aimt1)
+            puppet_weapon(p);
+            { uint64_t ctl = as_controller(p->actor); puppet_aim_bb(p, ctl ? rp(ctl + 0x40) : 0, 1); }
+            const char *c = ANIM[o[j].anim]; char up[32]; snprintf(up, sizeof up, "%sUpper", c);
+            as_play_slot(p->actor, c, 0); as_play_slot(p->actor, up, 1); as_play_slot(p->actor, up, 4);
+            p->anim = o[j].anim;
+        } else if (p->anim != o[j].anim && o[j].anim < N_ANIM && as_play_rate(p->actor, standin_cmd(o[j].anim), o[j].anim == 1 ? move_rate(p->child) : 1.0f)) {   // (not played: again next frame)
+            if (p->anim == 6 || p->anim == 7) { uint64_t ctl = as_controller(p->actor); puppet_aim_bb(p, ctl ? rp(ctl + 0x40) : 0, 0); }   // (the aim over)
             p->anim = o[j].anim;
             static int extra = -1; if (extra < 0) { const char *e = getenv("DM_MP_AS_EXTRA"); extra = e && *e ? atoi(e) : 1; }
             if (extra) {   // the face and the mask, as Link's own code plays them (slot 4: FaceLocomotion moving, Wait standing; slot 8: MaskUnequip)
@@ -1157,7 +1213,8 @@ static void trace_tick(uint64_t a) {
 static void apply_damage(int quarter_hearts, uint16_t attacker);
 typedef struct { uint32_t f; mp_remote r; } demo_row;
 // Event rows (tools/demo_compose.py): "E frame shot shooter x y z dx dy dz" (an arrow from another player, drawn as theirs are),
-// "E frame damage quarter_hearts attacker" (a hit on our Link, as the server's), "E frame notice text" (the game's info bar).
+// "E frame damage quarter_hearts attacker" (a hit on our Link, as the server's), "E frame notice text" (the game's info bar),
+// "E frame warp x y z yaw" (our Link moved there: footage recordings walk him along several paths in one run).
 // Input rows: "I frame buttons lx ly rx ry" (hex buttons, sticks -32767..32767): player 1's pad from that frame to the next I row
 typedef struct { uint32_t f; char kind; uint16_t who; int qh; float v[6]; char text[96]; } demo_event;
 typedef struct { uint32_t f; uint64_t buttons; int32_t axes[4]; } demo_input;
@@ -1178,6 +1235,7 @@ static void demo_events(uint64_t rel) {
         if (e->kind == 's') mp_game_shot_fx(e->who, e->v[0], e->v[1], e->v[2], e->v[3], e->v[4], e->v[5], 0);
         else if (e->kind == 'd') apply_damage(e->qh, e->who);
         else if (e->kind == 'n') mp_game_notice(e->text);
+        else if (e->kind == 'w') { uint64_t a = player_actor(); if (a) { float m[12]; yaw_matrix(m, e->v[0], e->v[1], e->v[2], (uint16_t)e->v[3]); ((f_warp_to_matrix)fn(F_WARP_TO_MATRIX))((void *)a, m, false); } }
         MP_GAME_LOG("demo: event %c at %u", e->kind, e->f);
     }
 }
@@ -1195,6 +1253,7 @@ static const mp_remote *demo_others(const mp_remote *o, int *n) {
                 if (!strcmp(kind, "shot") && sscanf(rest, "%u %f %f %f %f %f %f", &who, &ev.v[0], &ev.v[1], &ev.v[2], &ev.v[3], &ev.v[4], &ev.v[5]) == 7) { ev.kind = 's'; ev.who = (uint16_t)who; }
                 else if (!strcmp(kind, "damage") && sscanf(rest, "%d %u", &ev.qh, &who) == 2) { ev.kind = 'd'; ev.who = (uint16_t)who; }
                 else if (!strcmp(kind, "notice")) { ev.kind = 'n'; snprintf(ev.text, sizeof ev.text, "%s", rest); ev.text[strcspn(ev.text, "\r\n")] = 0; }
+                else if (!strcmp(kind, "warp") && sscanf(rest, "%f %f %f %f", &ev.v[0], &ev.v[1], &ev.v[2], &ev.v[3]) == 4) ev.kind = 'w';   // our Link to x y z, facing yaw (0..65535)
                 else continue;
                 if (g_ndev == ecap) { ecap = ecap ? ecap * 2 : 64; demo_event *ne = realloc(g_dev, ecap * sizeof *g_dev); if (!ne) break; g_dev = ne; }
                 g_dev[g_ndev++] = ev; continue;
@@ -1213,7 +1272,7 @@ static const mp_remote *demo_others(const mp_remote *o, int *n) {
             if (nrows == cap) { cap = cap ? cap * 2 : 8192; demo_row *nr = realloc(rows, cap * sizeof *rows); if (!nr) break; rows = nr; }
             rows[nrows++] = d;
         }
-        fclose(f); at = e ? strtoull(e, 0, 0) : 0; on = nrows > 0; g_demo_at = at; g_demo_on = on;
+        fclose(f); at = e ? strtoull(e, 0, 0) : 0; on = nrows > 0 || g_ndev > 0 || g_ndin > 0; g_demo_at = at; g_demo_on = on;   // (a recording: events and input only)
         MP_GAME_LOG("demo: %zu rows, %zu events, %zu input rows from %s, playing from frame %llu", nrows, g_ndev, g_ndin, p, (unsigned long long)at);
     }
     if (!on) return o;
