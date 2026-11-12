@@ -181,19 +181,38 @@ def online_files(work, data, logs, tree):
 
 def prebuild_pipelines(app, data, logs):
     """The base pipeline of every shader pair, built now into the app's pipeline archive (what the game would otherwise build in the background on its first start):
-    the app's own host in its tool mode (DM_PSO_PREBUILD=tool), with the folders the launcher gives it (launcher.c)"""
+    the app's own host in its tool mode (DM_PSO_PREBUILD=tool), with the folders the launcher gives it (launcher.c). Without them the game's first start compiles
+    for minutes before its title. As many compiles at once as Metal offers (18 on an M5 Max) starve the archive's writes (each goes through the same compiler
+    service): none was written in 3 minutes, and Metal then crashed the host in its own code (MultiLevelAirntBinaryCache, 7,000 pipelines in). With 4 at once
+    each period of about 1,900 bases was written in 15 s and nothing crashed: so about a quarter of the cores, and each next try goes on from what the archive
+    holds, with half as many. An optimization: whatever is still missing, the game builds itself on its first start"""
     res = app / 'Contents/Resources'
-    emit('stage', name='Render pipelines', step='a few minutes')
+    emit('stage', name='Render pipelines', step='')
     for d in ('save', 'temp'): (data / d).mkdir(parents=True, exist_ok=True)
-    env = tool_env(DM_PSO_PREBUILD='tool', DM_ROOT=data, DM_SAVE=data / 'save', DM_TEMP=data / 'temp', DM_MSL_DIR=res / 'msl', DM_NVN_SHMAP=res / 'dm/shader_map.tsv',
-                   DM_FONT_DIR=res / 'dm/font', DM_ROMFS=res / 'romfs.img')
-    t0 = time.time()
-    try: run([app / 'Contents/MacOS/dmhost'], log=logs / 'pipelines.log', env=env, cwd=data)
-    except Stop as e:   # an optimization: the game builds them itself on its first start
-        say(f'[RED] the render pipelines were not built now ({e}); the game builds them on its first start')
-        emit('stage_end', name='Render pipelines', ok=True, warn=True, summary='left to the first start'); return
-    built = re.findall(r'pipeline prebuild: .*', (logs / 'pipelines.log').read_text(errors='replace'))
-    emit('stage_end', name='Render pipelines', ok=True, summary=(built[-1][:120] if built else f'{time.time() - t0:.0f} s'))
+    first = max(2, min(6, (os.cpu_count() or 8) // 4))
+    for attempt, threads in enumerate((first, max(2, first // 2), 2), 1):
+        env = tool_env(DM_PSO_PREBUILD='tool', DM_PSO_PREBUILD_THREADS=threads, DM_ROOT=data, DM_SAVE=data / 'save', DM_TEMP=data / 'temp', DM_MSL_DIR=res / 'msl',
+                       DM_NVN_SHMAP=res / 'dm/shader_map.tsv', DM_FONT_DIR=res / 'dm/font', DM_ROMFS=res / 'romfs.img')
+        said, count = [], ''
+        with open(logs / 'pipelines.log', 'a') as log:
+            log.write(f'\n==== {time.strftime("%Y-%m-%d %H:%M:%S")} try {attempt}, {threads} at once\n'); log.flush()
+            p = subprocess.Popen([str(app / 'Contents/MacOS/dmhost')], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors='replace', env=env, cwd=data)
+            for line in p.stdout:
+                log.write(line); log.flush()
+                if 'pipeline prebuild' not in line: continue
+                said.append(line.strip())
+                m = re.search(r'pipeline prebuild: (\d+) of (\d+) pairs', line)
+                if m:
+                    count = f'{int(m[1]):,} of {int(m[2]):,}'
+                    emit('progress', name='Render pipelines', done=int(m[1]), total=int(m[2]), unit='', frac=int(m[1]) / int(m[2]))
+            rc = p.wait()
+        end = next((l for l in reversed(said) if 'pipeline prebuild done' in l or 'nothing to do' in l), None)
+        if end:
+            emit('stage_end', name='Render pipelines', ok=True, summary=end[end.index('pipeline prebuild'):][:120]); return
+        why = f'macOS\'s graphics compiler crashed it (signal {-rc})' if rc < 0 else f'it stopped (exit {rc})'
+        say(f'render pipelines: {why}' + (f' after {count}' if count else '') + ('; going on from there' if attempt < 3 else ''))
+    say('[RED] the render pipelines were not all built now: the game builds the rest on its first start')
+    emit('stage_end', name='Render pipelines', ok=True, warn=True, summary='the rest left to the first start')
 
 
 def server_address(given):

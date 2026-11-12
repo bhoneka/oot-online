@@ -117,6 +117,12 @@ It asks for the player's `.nup` and builds `~/Applications/Ocarina of Time Onlin
   reads the minimum macOS from the host itself (no `otool`), runs no `git` outside a checkout, decompresses with Python's
   `compression.zstd` (no `zstd` command) and asks `dmsh_rtc --arch` for the GPU. No pipeline archive is made offline (that is
   Xcode's `metal-tt`): the installer runs the host's prebuild (`DM_PSO_PREBUILD=tool`) into the player's `pso_archive` instead.
+  It matters: without the archive the game's first start compiled for 230 s before its title. With as many compiles at once as
+  Metal offers (18 on an M5 Max) the archive's writes, which go through the same compiler service, never got their turn (no
+  period written in 3 minutes), and Metal then crashed the host in its own code (`MultiLevelAirntBinaryCache::getElementAtDestination`
+  under `newRenderPipelineStateWithDescriptor`, 7,000 pairs in, while a period's `airntSerializeToURL` waited). With 4 at once
+  (`DM_PSO_PREBUILD_THREADS`) each period of about 1,900 bases was written in 15 s and nothing crashed: the installer runs a quarter
+  of the cores (at most 6), and a try that stops early is followed by one with half as many, going on from the periods written.
 - **On the player's Mac** (`setup/install.py`, run by the app with the standalone Python 3.14 it carries): nxnative is downloaded
   at `patches/NXNATIVE_COMMIT` from GitHub (the commit's archive, no git), the four patches applied with `/usr/bin/patch`,
   `integrate_nxnative.py` run, and the chain version checked against the prebuilt host's; then nxnative's build (`--no-xcode`),
