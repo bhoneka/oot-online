@@ -165,9 +165,10 @@ def scene_duel():
     # silhouette in the posts' shadow): Kaze (left, Zora) and Rinku (right, Kokiri) trade arrows across the bridge in profile; Hylia
     # (Goron, in the middle, facing us) and Mido (young) shoot at our Link (his hearts go; he doesn't flinch yet: his player code plays
     # his hit reactions, not a command); ours fires back twice at Hylia, puts the
-    # slingshot away (B: the camera comes back from over his shoulder) and Hylia falls and lies there (the client's down, lifted onto
-    # the planks: DOWN_LIFT); Rinku runs, Kaze drops him too. Every shot is the draw (BowCharge), the release (BowShoot) and
-    # the arrow; a hit is the target's flinch (DamageS) or knock-down (DamageL). events: (t, kind, ...); input: (t, buttons)
+    # slingshot away (B: the camera comes back from over his shoulder) and Hylia goes down: knocked flat, blown back onto the planks, lying
+    # there (the client's knock-down, puppet_knock: a kill is the server's down flag, as in real play); Rinku runs, Kaze drops him too.
+    # Every shot is the draw (BowCharge), the release (BowShoot) and the arrow; a hit that doesn't kill is the target's flinch (DamageS).
+    # events: (t, kind, ...); input: (t, buttons)
     K = Player(951, 'Kaze', 2, False, 2.1, 35.6, 0)
     R = Player(952, 'Rinku', 0, False, -2.1, 36.6, 0)
     H = Player(953, 'Hylia', 1, False, 0.45, 39.6, 180)
@@ -175,9 +176,9 @@ def scene_duel():
     kr = face_at((2.1, 35.6), (-2.1, 36.6)); rk = face_at((-2.1, 36.6), (2.1, 35.6))
     K.wait(30, kr); R.plan.append(('wait', 6.6, rk)); M.wait(30, face_at((-0.9, 38.4), CAMERA_LINK)); H.wait(9.0, 180)
     K.act(0.3, 1.5, 6).act(1.5, 1.85, 7).act(3.3, 3.85, 11).act(7.0, 7.9, 6).act(7.9, 8.25, 7)
-    R.act(1.6, 2.15, 11).act(2.2, 3.2, 6).act(3.2, 3.55, 7).act(8.0, 8.6, 13).down(8.6, 30)
+    R.act(1.6, 2.15, 11).act(2.2, 3.2, 6).act(3.2, 3.55, 7).down(8.0, 30)
     R.run(-2.3, 38.4).wait(30, face_at((-2.3, 38.4), (2.1, 35.6)))    # (6.6 s: a few steps back toward the posts, turning to face Kaze again)
-    H.act(2.0, 3.0, 6).act(3.0, 3.35, 7).act(4.42, 4.95, 11).act(5.55, 5.95, 13).down(5.95, 30)   # (she lies there to the end)
+    H.act(2.0, 3.0, 6).act(3.0, 3.35, 7).act(4.42, 4.95, 11).down(5.55, 30)   # (she lies there to the end)
     M.act(5.2, 6.2, 6).act(6.2, 6.55, 7)
     events = [(1.5, 'shot', K, R), (3.2, 'shot', R, K), (3.0, 'shot', H, None), (3.17, 'damage', 2, H), (6.2, 'shot', M, None),
               (6.33, 'damage', 1, M), (6.05, 'notice', 'You shot Hylia'), (7.9, 'shot', K, R)]

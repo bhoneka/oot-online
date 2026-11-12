@@ -46,7 +46,8 @@ typedef struct {
              f_watch_take, f_watch_free_failed, f_watch_cancel;
     uint64_t g_pouch, g_playing_info,   // the ranged weapon (re/ITEMS.md): game::PouchMgr, PlayingInfo
              f_pouch_push, f_pouch_actor_info, f_pouch_category, f_get_assigned, f_set_assigned, f_setbool, f_getint,
-             f_req_equip, f_armor_default;   // a stand-in's tunic (the game's equipFromGameData path for slot 8)
+             f_req_equip, f_armor_default,   // a stand-in's tunic (the game's equipFromGameData path for slot 8)
+             f_get_model, f_search_bone;   // an actor's model, a bone of it by name (the arrow-hold position code, main+0x2e58500, uses both)
 } oot_build;
 static const oot_build BUILDS[] = {
     { "e0f3ccfaf50065ae4ea01eb5aeb13b1a", 0xe0f3ccfau,   // v131072 (the update)
@@ -56,7 +57,8 @@ static const oot_build BUILDS[] = {
       0x3773090, 0xfe6110, 0xd79f10, 0xf61460, 0x20b6f0, 0xbcc0b0, 0xcb0ea0, 0x163b70, 0x17ce50, 0x29d40d0,
       0x36fbd0, 0x36fde0, 0xb2fa30,
       0x4e78e28, 0x4e7cfa8, 0x110d570, 0x58ed10, 0x13fdd0, 0x17b6e0, 0x1211c00, 0x682b20, 0x837070,
-      0x1013f20, 0x10aceb0 },
+      0x1013f20, 0x10aceb0,
+      0x3ad0640, 0x1b3620 },
     { "33fa6c2c23848282a77e8b88a0a93f48", 0x33fa6c2cu,   // v65536 (the base game, no update)
       0x4e271e8, 0x4e21428, 0x4e13e48, 0x4e21570, 0x4e140b8, 0x4e27e80, 0x4e243e0, 0x4e24c48, 0x4bbc4d8, 0x49101f8,
       0x27e8e0, 0xd01360, 0x2da26f0, 0x97feb0, 0xc35730, 0xc35500, 0xc4fa0, 0x2b63a0, 0xb4ac90,
@@ -66,7 +68,8 @@ static const oot_build BUILDS[] = {
       // the item functions, mapped 2026-11-11 with re/tools/port_v65536.py's matchers: push 0x11378f0 by 9 calls from 3 matched callers
       // (its body changed), the others by body or callers; PouchMgr's +0x3bb0 / +0x3bc0 checked in its init and readers
       0x4e08a30, 0x4e0cb60, 0x11378f0, 0x473490, 0x47aaf0, 0x59be30, 0xa01f40, 0x691500, 0xba7d00,
-      0xb15580, 0x107d9a0 },   // (the two equip calls: by their callers, 746/747 and 408/422 words equal)
+      0xb15580, 0x107d9a0,   // (the two equip calls: by their callers, 746/747 and 408/422 words equal)
+      0x3a70ef0, 0x7c6da0 },   // (model and bone search: fingerprints unique in both builds, port_v65536.py)
 };
 static const oot_build *B = &BUILDS[0];
 // the names the code below uses, read from the running build's table
@@ -117,11 +120,13 @@ static const oot_build *B = &BUILDS[0];
 #define F_GETINT (B->f_getint)
 #define F_REQ_EQUIP (B->f_req_equip)
 #define F_ARMOR_DEFAULT (B->f_armor_default)
+#define F_GET_MODEL (B->f_get_model)
+#define F_SEARCH_BONE (B->f_search_bone)
 #define F_WATCH_CANCEL (B->f_watch_cancel)   // the running build's addresses (ready() picks it; until then the update's, never used)
 static int g_ok = -1;                    // 1: a build the map knows
 static double now_s(void);
 // A switch read again about once a second, so a test run can change it while the game runs (tools/ctl.sh <run> "env NAME=value")
-typedef struct { const char *name; double read_at; char value[32]; } env_switch;
+typedef struct { const char *name; double read_at; char value[192]; } env_switch;
 static const char *env_now(env_switch *s) {
     double t = now_s();
     if (s->read_at <= 0 || t - s->read_at >= 1) { s->read_at = t; const char *e = getenv(s->name); snprintf(s->value, sizeof s->value, "%s", e ? e : ""); }
@@ -204,6 +209,8 @@ static uint16_t anim_index(const char *cmd) {
     if (!strncmp(cmd, "Horse", 5) || !strncmp(cmd, "Rideon", 6)) return 23;
     if (!strncmp(cmd, "Bow", 3)) return 6;
     if (!strncmp(cmd, "Cut", 3)) return 8;
+    if (!strcmp(cmd, "LandDamage")) return 13;   // (knocked flat, on the floor: still 13, so a stand-in lies there too)
+    if (!strncmp(cmd, "DamageLStand", 12)) return 0;   // (getting up: a stand-in does its own, puppet_knock)
     if (!strncmp(cmd, "Damage", 6)) return 11;
     if (!strncmp(cmd, "LockOn", 6)) return 20;
     if (!strncmp(cmd, "Ladder", 6)) return 24;
@@ -661,10 +668,12 @@ typedef struct { uint16_t id; uint64_t watch; uint64_t actor; int outfit, child;
                  float lx, lz, spd; uint64_t lf; double lt; int moving, bb_said;   // puppet_speed: the last position, when, the speed it gives (m/s, smoothed)
                  double check_t; int replays;   // puppet_check: when its sequence was last checked, how often a command had to be played again
                  uint64_t navi_watch, navi; int navi_anim; uint8_t navi_arg[0xa0] __attribute__((aligned(16)));   // navi_tick: its own fairy
+                 uint64_t bow_watch, bow; int bow_shown, bow_anim; uint8_t bow_arg[0xa0] __attribute__((aligned(16)));   // bow_tick: its bow (young: slingshot) in hand
                  int weapon_on;   // its bow / slingshot made (puppet_weapon)
                  double down_t;   // when its player went down (it falls and lies there DOWN_HOLD s, then goes)
                  float down_p[3]; uint16_t down_yaw;   // where it fell (it stays there)
-                 float lift; double lift_t; float lift_test;   // knocked flat: how far it is lifted now (puppet_lift), when last changed
+                 int kb_k, kb_slide;   // (tests: which knock-down this is, for DM_MP_KB_* lists); it slides back (knocked down by a kill: KB_BACK)
+                 int kb; double kb_t; int down_set;   // knocked flat (puppet_knock): 0 no, 1 blown back, 2 lying, 3 getting up; since when; down_p is where it fell
                  float aim_turn; double aim_t;   // its turn while it aims (AIM_TURN: its bow arm along its player's aim), and when last turned
                  uint8_t arg[0xa0] __attribute__((aligned(16)));
                  uint8_t bb[0x1918] __attribute__((aligned(16))); } Puppet;
@@ -925,6 +934,56 @@ static void navi_tick(Puppet *p, const mp_remote *o) {
                             MP_GAME_LOG("Navi for %s hovers (slots 0 '%s', 1 '%s')", p->name, c0, c1); }
     }
 }
+// Others' bows (young Link: slingshots) in their hands while they aim: OnlineBow / OnlineSling (tools/make_online_mod.py: the game's own
+// bow and slingshot with no physics and no placement motion), placed every frame on the stand-in's BOW_BONE, where Link's EquipmentUser
+// binds his (Player_Adult's EquipmentUserParam: BowEquippedBoneName Weapon_R, no drawn offsets), and out of sight under it the rest of the
+// time (Link's sheathed bow sleeps, IsBowSheathedSleep). The game's own ways to give a stand-in its bow made nothing appear
+// (requestCreateEquipment slots 1-4, the slot-2 creation main+0x2e01a90, Link's own EquipmentUserParam: runs/aimt2-9). DM_MP_BOW=0: none
+#define BOW_BONE "Weapon_R"
+static int bone_world(uint64_t actor, const char *bone, float *m) {   // a bone's world matrix (Matrix34f, row-major), as main+0x2e58500 reads one
+    if (!F_GET_MODEL || !F_SEARCH_BONE) return 0;
+    uint64_t model = ((uint64_t (*)(uint64_t))fn(F_GET_MODEL))(actor); if (!model) return 0;
+    typedef struct { int16_t unit, bone; uint8_t pad[28]; } bone_ref;   // (returned through x8, as the game's own callers take it)
+    const char *name = bone; bone_ref r = ((bone_ref (*)(uint64_t, const char **))fn(F_SEARCH_BONE))(model, &name);
+    if (r.unit < 0 || r.bone < 0 || r.unit >= (int)r32(model + 0x20)) return 0;
+    uint64_t unit = rp(rp(model + 0x28) + 8ull * (uint64_t)r.unit), obj = unit ? rp(unit) : 0; if (!obj) return 0;
+    ((void (*)(uint64_t, float *, int))rp(rp(obj) + 0x78))(obj, m, r.bone);
+    return m[3] == m[3] && fabsf(m[3]) < 1e6f;   // (a real position)
+}
+static void bow_drop(Puppet *p) {
+    if (p->bow && r32(p->bow + A_STATE) >= 3 && r32(p->bow + A_STATE) <= 6) ((f_request_delete)fn(F_REQUEST_DELETE))((void *)p->bow, 0);
+    watch_cancel(&p->bow_watch); p->bow = 0; p->bow_shown = 0;
+}
+static void bow_tick(Puppet *p, int aiming, int anim) {
+    static env_switch sw = { .name = "DM_MP_BOW" }; if (!strcmp(env_now(&sw), "0")) return;
+    if (!p->bow && !p->bow_watch) {
+        // (made with its stand-in, kept out of sight: made at its first draw, it showed up a few frames late, runs/vid29)
+        memset(p->bow_arg, 0, sizeof p->bow_arg);
+        float at[3]; rd(p->actor + A_POS, at, sizeof at); at[1] -= 20;
+        float rot[9] = { 1, 0, 0, 0, 1, 0, 0, 0, 1 }, sc[3] = { 1, 1, 1 };
+        memcpy(p->bow_arg + 0x00, at, 12); memcpy(p->bow_arg + 0x0c, rot, 36); memcpy(p->bow_arg + 0x30, sc, 12);
+        static const char *empty = ""; memcpy(p->bow_arg + 0x40, &empty, 8);
+        p->bow_arg[0x4a] = 1; *(uint32_t *)(p->bow_arg + 0x98) = 1 | 2 | 4;
+        static const char *adult = "OnlineBow", *child = "OnlineSling"; uint32_t result = 0;
+        bool ok = ((f_create)fn(F_CREATE_ACTOR))((void *)rp((uint64_t)M + G_ACTOR_MGR), p->child ? &child : &adult, p->bow_arg, &p->bow_watch, 1, NULL, NULL, NULL, 0, &result, NULL);
+        static int said; if (!ok && said++ < 3) MP_GAME_LOG("bow for %s not requested (result %u)", p->name, result);
+        return;
+    }
+    if (!p->bow) { if ((p->bow = watch_take(&p->bow_watch))) MP_GAME_LOG("bow for %s taken", p->name); return; }
+    uint32_t st = r32(p->bow + A_STATE); if (st == 3) return;
+    if (st != 4) { p->bow = 0; p->bow_shown = 0; return; }   // gone (the game deleted it): made again when it aims
+    float m[12];
+    if (aiming && bone_world(p->actor, BOW_BONE, m)) {
+        if (!p->bow_shown) { p->bow_shown = 1; MP_GAME_LOG("bow for %s in hand at %.2f %.2f %.2f", p->name, m[3], m[7], m[11]); }
+        if (p->bow_anim != anim && as_controller(p->bow)) {   // its string, as the bow's own sequence plays it: Draw while its archer draws, Shoot
+            as_play_rate(p->bow, anim == 7 ? "Shoot" : "Draw", 1.0f); p->bow_anim = anim;
+        }
+    } else {
+        p->bow_anim = 0;
+        float at[3]; rd(p->actor + A_POS, at, sizeof at); yaw_matrix(m, at[0], at[1] - 20, at[2], 0); p->bow_shown = 0;
+    }
+    ((f_force_set_matrix)fn(F_FORCE_SET_MATRIX))((void *)p->bow, m, false);
+}
 // DM_MP_BBPROBE=1 also logs the first stand-in's whole blackboard every second (floats and bools, as for Link): what Link's own code
 // keeps set that a stand-in lacks
 static void bb_dump(const char *who, uint64_t actor) {
@@ -964,37 +1023,96 @@ static void puppet_weapon(Puppet *p) {
     p->weapon_on = 1; MP_GAME_LOG("stand-in for %s: %s out (slot %d, state %d): %s", p->name, w, slot, state, asked ? "asked" : "refused");
 }
 #define AIM_TURN 8192.0f   // 45 degrees (u16 yaw)
-// A player who goes down falls where they stood (Link's DamageL: knocked flat; DM_MP_DOWN_CMD tries another) and lies there, its Navi
-// over it, until the server brings them back (at most DOWN_HOLD s); it went the moment the server said so before, gone in a blink
-// mid-fight (runs/vid23), and a 2.2 s hold still blinked out before the respawn
+// A player who goes down is knocked flat where they stood and lies there, its Navi over it, until the server brings them back (at most
+// DOWN_HOLD s); it went the moment the server said so before, gone in a blink mid-fight (runs/vid23), and a 2.2 s hold still blinked out
 #define DOWN_HOLD 6.0
-#define DOWN_LIFT 0.18f   // m, adult (runs/downt2: 0.15 rests on the planks, 0.35 floats); young Link, about 0.7 the size: 0.7 of it
-// Link's knock-down (DamageL) ends with him lying lower than where he stood: his own code sets him on the ground, and a stand-in, held at
-// its standing height, lay half inside the planks (runs/vid24). While it is knocked flat (its player's DamageL, or down) it is lifted
-// DOWN_LIFT, eased in over DOWN_LIFT_T s while it flies back, so it lands on the floor; out again as it gets up. (Dead / LandDead lie
-// flat but in the air: runs/downt1.) DM_MP_DOWN_LIFT=a,b,c (tests: one per player in the order they are knocked down)
-#define DOWN_LIFT_T 0.1   // (0.25 s was slower than the fall: it dipped into the planks for a few frames, runs/vid26)
-static float down_lift_at(int k) {
-    static env_switch e = { .name = "DM_MP_DOWN_LIFT" }; const char *v = env_now(&e); if (!v[0]) return -1;   // (-1: the default, by age)
-    const char *q = v; for (int i = 0; i < k && strchr(q, ','); i++) q = strchr(q, ',') + 1; return (float)atof(q);
+// Knocked flat, as the game does it to Link (runs/downt5): blown back (KB_HIT, DamageL), lying on the floor once its flight is over
+// (KB_LIE after KB_LIE_T s: Link's own code lays him down when he lands, and a stand-in has no physics, so it is timed), lying there
+// while its player is knocked flat or down, then getting up (KB_UP, DamageLStand, which starts from lying flat on the floor) when they
+// are on their feet again where it lies; back somewhere else (a spawn point): it goes there. Tried and dropped (runs/downt4, downt5):
+// Link's Dead and LandDead stagger and fall on their face, which his ragdoll ends, so a stand-in lay in the air; LandDamage is his
+// crouch after a long fall; DamageL held alone sinks into the floor (his flight lifts him, his own code puts him down).
+// While it flies it is lifted KB_LIFT (DamageL's pose, held at standing height, is that far under the floor) plus a hop of KB_HOP, and a
+// downed one slides back KB_BACK (Link's own flight moves him back as far: for a player knocked flat the network carries that).
+// Young Link: 0.7 of each. DM_MP_KB_HIT, _LIE, _LIE_T, _UP, _UP_T, _LIFT, _HOP, _BACK (tests: comma lists, one per knock-down in turn)
+#define KB_HIT "DamageL"
+#define KB_LIE "DamageLStand*0"   // (command*rate: rate 0 holds its first frame)
+#define KB_LIE_T 0.30
+#define KB_UP "DamageLStand"
+#define KB_UP_T 1.50
+#define KB_LIFT 0.18f
+#define KB_HOP 0.15f
+#define KB_BACK 0.8f
+#define KB_UP_NEAR 1.5f   // m: back within this of where it lies: it gets up there
+static const char *kb_item(env_switch *e, int k, const char *dflt, char *out, size_t cap) {   // the k-th of a comma list (the last repeated)
+    const char *v = env_now(e); if (!v[0]) return dflt;
+    const char *q = v; for (int i = 0; i < k && strchr(q, ','); i++) q = strchr(q, ',') + 1;
+    size_t n = strcspn(q, ","); if (n >= cap) n = cap - 1; memcpy(out, q, n); out[n] = 0; return out;
 }
-static void puppet_lift(Puppet *p, int flat) {
-    static int knocks; double gt = game_now(), dt = p->lift_t > 0 ? gt - p->lift_t : 0; p->lift_t = gt; if (dt > 0.1) dt = 0.1;
-    if (flat && p->lift == 0 && p->lift_test == 0) { float v = down_lift_at(knocks++); p->lift_test = v; }   // (tests)
-    float full = p->lift_test > 0 ? p->lift_test : p->child ? DOWN_LIFT * 0.7f : DOWN_LIFT, want = flat ? full : 0;
-    float step = (float)(full * dt / DOWN_LIFT_T);
-    p->lift += want > p->lift ? fminf(step, want - p->lift) : -fminf(step, p->lift - want);
-    if (!flat && p->lift == 0) p->lift_test = 0;
+static double kb_num(env_switch *e, int k, double dflt) { char b[32]; const char *v = kb_item(e, k, NULL, b, sizeof b); return v ? atof(v) : dflt; }
+static int as_play_cmd(uint64_t actor, const char *spec, int restart) {   // "Command" or "Command*rate"; restart: even if it plays already
+    char c[64]; snprintf(c, sizeof c, "%s", spec); char *r = strchr(c, '*'); float rate = 1.0f; if (r) { *r++ = 0; rate = (float)atof(r); }
+    if (!restart) return as_play_rate(actor, c, rate);
+    if (!standin_online() || !as_controller(actor)) return 0;
+    static const int slots[] = { 0, 1 };
+    for (int i = 0; i < 2; i++) {
+        struct { uint64_t actor; const char *cmd; int32_t slot; float rate; float a, b; uint8_t ignore_same, all_slots; uint8_t pad[6]; } rec =
+            { actor, c, slots[i], rate, -1.0f, -1.0f, 0, 0, { 0 } };
+        ((f_as_play)fn(F_AS_PLAY))(&rec);
+    }
+    return 1;
 }
-// (tests: DM_MP_DOWN_CMD=a,b,c: one per player in the order they go down, the last repeated)
-static const char *down_cmd_at(int k) {
-    static env_switch e = { .name = "DM_MP_DOWN_CMD" }; const char *v = env_now(&e); if (!v[0]) return "DamageL";
-    static char out[48]; const char *q = v; for (int i = 0; i < k && strchr(q, ','); i++) q = strchr(q, ',') + 1;
-    size_t n = strcspn(q, ","); if (n >= sizeof out) n = sizeof out - 1; memcpy(out, q, n); out[n] = 0; return out;
+static env_switch e_kb_hit = { .name = "DM_MP_KB_HIT" }, e_kb_lie = { .name = "DM_MP_KB_LIE" }, e_kb_lie_t = { .name = "DM_MP_KB_LIE_T" },
+                  e_kb_up = { .name = "DM_MP_KB_UP" }, e_kb_up_t = { .name = "DM_MP_KB_UP_T" }, e_kb_lift = { .name = "DM_MP_KB_LIFT" },
+                  e_kb_hop = { .name = "DM_MP_KB_HOP" }, e_kb_back = { .name = "DM_MP_KB_BACK" };
+// The knock sequence for a frame; flat: its player is knocked flat or down now. Says whether it played the stand-in's animation
+static int puppet_knock(Puppet *p, const mp_remote *r, int flat) {
+    static int knocks; double gt = game_now(); char b[64];
+    if (flat && (p->kb == 0 || p->kb == 3)) {
+        p->kb_k = knocks++; p->kb_slide = p->down_set; const char *c = kb_item(&e_kb_hit, p->kb_k, KB_HIT, b, sizeof b);
+        as_play_cmd(p->actor, c, 1); p->kb = 1; p->kb_t = gt; p->anim = 13;
+        MP_GAME_LOG("stand-in for %s: knocked flat (%s)", p->name, c); return 1;
+    }
+    if (p->kb == 1) {   // blown back: lying on the floor when its flight is over (up again already: it lies down first)
+        if (gt - p->kb_t >= kb_num(&e_kb_lie_t, p->kb_k, KB_LIE_T)) {
+            const char *c = kb_item(&e_kb_lie, p->kb_k, KB_LIE, b, sizeof b); as_play_cmd(p->actor, c, 1); p->kb = 2; p->kb_t = gt;
+            MP_GAME_LOG("stand-in for %s: lying (%s)", p->name, c);
+        }
+        return 1;
+    }
+    if (p->kb == 2) {
+        if (flat) return 1;   // lying there
+        if (p->down_set) {   // back from down: it gets up here only if its player is back where it lies
+            float dx = r->x - p->down_p[0], dz = r->z - p->down_p[2];
+            if (dx * dx + dz * dz > KB_UP_NEAR * KB_UP_NEAR) {
+                p->kb = 0; p->down_set = 0; p->anim = -1; MP_GAME_LOG("stand-in for %s: back somewhere else", p->name); return 0;
+            }
+        }
+        const char *c = kb_item(&e_kb_up, p->kb_k, KB_UP, b, sizeof b); as_play_cmd(p->actor, c, 1); p->kb = 3; p->kb_t = gt;
+        MP_GAME_LOG("stand-in for %s: getting up (%s)", p->name, c); return 1;
+    }
+    if (p->kb == 3) {
+        if (gt - p->kb_t < kb_num(&e_kb_up_t, p->kb_k, KB_UP_T)) return 1;
+        p->kb = 0; p->down_set = 0; p->anim = -1;   // up: whatever its player does now is played again
+    }
+    return 0;
+}
+// Where the knock sequence puts it: lifted (in the air while it flies), and slid back (a downed one, from where it fell)
+static void knock_place(const Puppet *p, float *lift, float *back) {
+    float s = p->child ? 0.7f : 1.0f, sl = p->kb_slide ? s : 0; *lift = 0; *back = 0;
+    if (p->kb == 1) {
+        double t = game_now() - p->kb_t, T = kb_num(&e_kb_lie_t, p->kb_k, KB_LIE_T), u = T > 0 ? fmin(t / T, 1.0) : 1.0, in = fmin(t / 0.1, 1.0);
+        *lift = s * (float)(kb_num(&e_kb_lift, p->kb_k, KB_LIFT) * in + kb_num(&e_kb_hop, p->kb_k, KB_HOP) * 4 * u * (1 - u));
+        *back = sl * (float)(kb_num(&e_kb_back, p->kb_k, KB_BACK) * (1 - (1 - u) * (1 - u)));
+    } else if (p->kb == 2 || p->kb == 3) *back = sl * (float)kb_num(&e_kb_back, p->kb_k, KB_BACK);
+}
+static void down_spot(const Puppet *p, float *out) {   // where a downed one is drawn: where it fell, slid back along its facing
+    float lift, back; knock_place(p, &lift, &back); double a = p->down_yaw / 65536.0 * 2 * M_PI;
+    out[0] = p->down_p[0] - (float)sin(a) * back; out[1] = p->down_p[1] + lift; out[2] = p->down_p[2] - (float)cos(a) * back;
 }
 static void puppets_update(uint64_t me, const mp_remote *o, int n, uint32_t scene) {
     if (scene != g_pup_scene) {   // a new area: the game deleted the stand-ins; requests still pending are cancelled (they would leak the engine's watchers)
-        for (int i = 0; i < MAX_PUPPETS; i++) { watch_cancel(&g_pup[i].watch); watch_cancel(&g_pup[i].navi_watch); }
+        for (int i = 0; i < MAX_PUPPETS; i++) { watch_cancel(&g_pup[i].watch); watch_cancel(&g_pup[i].navi_watch); watch_cancel(&g_pup[i].bow_watch); }
         memset(g_pup, 0, sizeof g_pup); g_pup_scene = scene;
     }
     if (n > MAX_PUPPETS) n = MAX_PUPPETS;
@@ -1008,7 +1126,7 @@ static void puppets_update(uint64_t me, const mp_remote *o, int n, uint32_t scen
             else { if (!p->down_t) p->down_t = game_now(); keep = p->actor && game_now() - p->down_t < DOWN_HOLD; } }   // (game time: footage too)
         if (!keep) {
             if (p->actor && r32(p->actor + A_STATE) >= 3 && r32(p->actor + A_STATE) <= 6) ((f_request_delete)fn(F_REQUEST_DELETE))((void *)p->actor, 0);
-            navi_drop(p);
+            navi_drop(p); bow_drop(p);
             watch_cancel(&p->watch); p->id = 0; p->actor = 0;
         }
     }
@@ -1016,18 +1134,18 @@ static void puppets_update(uint64_t me, const mp_remote *o, int n, uint32_t scen
     for (int j = 0; j < n; j++) {
         Puppet *p = NULL;
         for (int i = 0; i < MAX_PUPPETS; i++) if (g_pup[i].id == o[j].id) p = &g_pup[i];
-        if (o[j].flags & MP_PF_DEAD) {   // down: no stand-in made for it; the one there falls where it stood and lies still (then goes, above)
-            static int downs; const char *dc = down_cmd_at(downs);
-            if (p && p->actor && r32(p->actor + A_STATE) == 4 && p->anim != 14 && (p->anim == 13 || as_play_rate(p->actor, dc, 1.0f))) {
-                MP_GAME_LOG("stand-in for %s: down (%s)", p->name, p->anim == 13 ? "already knocked flat" : dc);   // (no second fall)
-                p->anim = 14; downs++;
-                p->down_p[0] = o[j].x; p->down_p[1] = o[j].y; p->down_p[2] = o[j].z; p->down_yaw = (uint16_t)(o[j].yaw - (int)p->aim_turn);
-            }
-            if (p && p->actor && p->anim == 14 && r32(p->actor + A_STATE) == 4) {   // where it fell, on the floor (puppet_lift)
-                puppet_lift(p, 1);
-                float m[12]; yaw_matrix(m, p->down_p[0], p->down_p[1] + p->lift, p->down_p[2], p->down_yaw);
+        if (o[j].flags & MP_PF_DEAD) {   // down: no stand-in made for it; the one there is knocked flat where it stood and lies there
+            // (puppet_knock) until its player is back (it gets up there, or goes where they are) or DOWN_HOLD is over (it goes, above)
+            if (p && p->actor && r32(p->actor + A_STATE) == 4) {
+                if (!p->down_set) { p->down_set = 1; p->down_p[0] = o[j].x; p->down_p[1] = o[j].y; p->down_p[2] = o[j].z;
+                                    p->down_yaw = (uint16_t)(o[j].yaw - (int)p->aim_turn); MP_GAME_LOG("stand-in for %s: down", p->name); }
+                puppet_knock(p, &o[j], 1);
+                float w[3]; down_spot(p, w);
+                float m[12]; yaw_matrix(m, w[0], w[1], w[2], p->down_yaw);
                 ((f_force_set_matrix)fn(F_FORCE_SET_MATRIX))((void *)p->actor, m, false);
-                navi_tick(p, &o[j]);   // (its Navi stays over it)
+                mp_remote at = o[j]; at.x = w[0]; at.y = p->down_p[1]; at.z = w[2]; at.yaw = p->down_yaw;
+                navi_tick(p, &at);   // (its Navi stays over it, wherever its player walks meanwhile)
+                bow_tick(p, 0, 0);
             }
             continue;
         }
@@ -1050,19 +1168,23 @@ static void puppets_update(uint64_t me, const mp_remote *o, int n, uint32_t scen
             float want = (p->anim == 6 || p->anim == 7) ? AIM_TURN : 0, step = (float)(AIM_TURN * dt / 0.12);
             p->aim_turn += want > p->aim_turn ? fminf(step, want - p->aim_turn) : -fminf(step, p->aim_turn - want);
         }
-        puppet_lift(p, p->anim == 13);   // (its player knocked flat: DamageL)
-        float m[12]; yaw_matrix(m, o[j].x, o[j].y + p->lift, o[j].z, (uint16_t)(o[j].yaw - (int)p->aim_turn));
+        int flat = o[j].anim == 13 || o[j].anim == 14;   // its player knocked flat (DamageL), or dead the game's own way
+        float m[12];
+        if (p->down_set) { float w[3]; down_spot(p, w); yaw_matrix(m, w[0], w[1], w[2], p->down_yaw); }   // back from down: where it lies, until it is up
+        else { float lift, back; knock_place(p, &lift, &back); yaw_matrix(m, o[j].x, o[j].y + lift, o[j].z, (uint16_t)(o[j].yaw - (int)p->aim_turn)); }
         ((f_force_set_matrix)fn(F_FORCE_SET_MATRIX))((void *)p->actor, m, false);
         { static int probe = -1; static double last; if (probe < 0) probe = getenv("DM_MP_BBPROBE") ? atoi(getenv("DM_MP_BBPROBE")) : 0;
           if (probe && p == &g_pup[0] && t - last > 1.0) { last = t; bb_dump("Link", me); for (int q = 0; q < MAX_PUPPETS; q++) if (g_pup[q].actor && (probe > 1 || q == 0)) bb_dump(g_pup[q].name, g_pup[q].actor); } }   // (before our writes; DM_MP_BBPROBE=2: every stand-in)
         puppet_speed(p, o[j].x, o[j].z);
         navi_tick(p, &o[j]);
+        bow_tick(p, !p->kb && (o[j].anim == 6 || o[j].anim == 7), o[j].anim);
         {   // DM_MP_PUPLOG=<file> (tests): where each stand-in is drawn every frame, to measure how smoothly others move
             static int on = -1; static FILE *lf; if (on < 0) { const char *e = getenv("DM_MP_PUPLOG"); on = e && *e && (lf = fopen(e, "w")) != NULL; if (on) fprintf(lf, "#frame\tt\tid\tx\ty\tz\tyaw\tanim\tspd\n"); }
             if (on) { fprintf(lf, "%llu\t%.4f\t%u\t%.4f\t%.4f\t%.4f\t%u\t%u\t%.3f\n", (unsigned long long)dm_guest_frame(), now_s(), o[j].id, o[j].x, o[j].y, o[j].z, o[j].yaw, o[j].anim, p->spd); fflush(lf); }
         }
         { float lp[3] = { 0, 0, 0 }; rd(me + A_POS, lp, sizeof lp); float dx = o[j].x - lp[0], dz = o[j].z - lp[2]; puppet_check(p, t, sqrtf(dx * dx + dz * dz)); }
-        if (p->anim != o[j].anim && (o[j].anim == 6 || o[j].anim == 7) && as_controller(p->actor)) {
+        if (puppet_knock(p, &o[j], flat)) {   // knocked flat, lying, getting up: its own sequence
+        } else if (p->anim != o[j].anim && (o[j].anim == 6 || o[j].anim == 7) && as_controller(p->actor)) {
             // the bow (young: the slingshot) out and drawn, as Link's own code does it (runs/aim1, his slots while aiming): the command on
             // slot 0, its Upper variant on 1 and 4 (BowCharge / BowChargeUpper, BowShoot / BowShootUpper), with his aim's blackboard values
             // (puppet_aim_bb: without them an adult stand-in stood still while its arrow flew, runs/vid19; with them it draws, runs/aimt1)
