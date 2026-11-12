@@ -18,7 +18,7 @@ Nothing else: no Xcode, no Homebrew, no Terminal.
 
 ## Install
 
-1. **[Download the installer](https://github.com/bhoneka/oot-online/releases/latest/download/Install-OoT-Online.zip)** and open
+1. **[Download the installer](https://github.com/bhoneka/oot-online/releases/latest/download/Install-OoT-Online.zip)** (version 1.0.0, 33 MB) and open
    **Install OoT Online** (double-click the zip first if your browser left it zipped).
 2. The first time, macOS says it cannot check the app for malicious software: it is a free fan project, not signed by Apple.
    Click **Done**, then open **System Settings → Privacy & Security**, scroll down, click **Open Anyway** next to "Install OoT

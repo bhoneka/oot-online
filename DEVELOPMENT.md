@@ -143,7 +143,10 @@ It asks for the player's `.nup` and builds `~/Applications/Ocarina of Time Onlin
   and `ootonline-setup.sh`'s checkout; `~/nxnative` when it is not set): a player's Mac has no `~/nxnative`.
 - **A release:** Actions → installer → Run workflow with a version (e.g. `1.0.0`): it builds on GitHub's `xcode-27` runner
   (Xcode 27.1, the one the tested host was built with) and publishes `installer-v1.0.0` with `Install-OoT-Online.zip`. Pushes to
-  the `installer` branch build it without releasing (an artifact).
+  the `installer` branch build it without releasing (an artifact). For 1.0.0 (2026-11-11) GitHub refused the workflow's own
+  token at the release step (`HTTP 403: Resource not accessible by integration`, though the run had `Contents: write`, twice):
+  the release was made from that run's artifact with `gh release create installer-v1.0.0 Install-OoT-Online.zip --verify-tag
+  --latest` (same title and notes). If the step fails again, do the same.
 
 ## Folders
 
