@@ -669,6 +669,7 @@ typedef struct { uint16_t id; uint64_t watch; uint64_t actor; int outfit, child;
                  double check_t; int replays;   // puppet_check: when its sequence was last checked, how often a command had to be played again
                  uint64_t navi_watch, navi; int navi_anim; uint8_t navi_arg[0xa0] __attribute__((aligned(16)));   // navi_tick: its own fairy
                  uint64_t bow_watch, bow; int bow_shown, bow_anim; uint8_t bow_arg[0xa0] __attribute__((aligned(16)));   // bow_tick: its bow (young: slingshot) in hand
+                 uint64_t nock_watch, nock; uint8_t nock_arg[0xa0] __attribute__((aligned(16)));   // and an adult's arrow on the string while it draws
                  int weapon_on;   // its bow / slingshot made (puppet_weapon)
                  double down_t;   // when its player went down (it falls and lies there DOWN_HOLD s, then goes)
                  float down_p[3]; uint16_t down_yaw;   // where it fell (it stays there)
@@ -953,21 +954,48 @@ static int bone_world(uint64_t actor, const char *bone, float *m) {   // a bone'
 static void bow_drop(Puppet *p) {
     if (p->bow && r32(p->bow + A_STATE) >= 3 && r32(p->bow + A_STATE) <= 6) ((f_request_delete)fn(F_REQUEST_DELETE))((void *)p->bow, 0);
     watch_cancel(&p->bow_watch); p->bow = 0; p->bow_shown = 0;
+    if (p->nock && r32(p->nock + A_STATE) >= 3 && r32(p->nock + A_STATE) <= 6) ((f_request_delete)fn(F_REQUEST_DELETE))((void *)p->nock, 0);
+    watch_cancel(&p->nock_watch); p->nock = 0;
+}
+static int display_make(Puppet *p, const char *name, uint8_t *arg, uint64_t *watch) {   // a display actor beside a stand-in, out of sight under it
+    memset(arg, 0, 0xa0);
+    float at[3]; rd(p->actor + A_POS, at, sizeof at); at[1] -= 20;
+    float rot[9] = { 1, 0, 0, 0, 1, 0, 0, 0, 1 }, sc[3] = { 1, 1, 1 };
+    memcpy(arg + 0x00, at, 12); memcpy(arg + 0x0c, rot, 36); memcpy(arg + 0x30, sc, 12);
+    static const char *empty = ""; memcpy(arg + 0x40, &empty, 8);
+    arg[0x4a] = 1; *(uint32_t *)(arg + 0x98) = 1 | 2 | 4;
+    const char *n = name; uint32_t result = 0;
+    bool ok = ((f_create)fn(F_CREATE_ACTOR))((void *)rp((uint64_t)M + G_ACTOR_MGR), &n, arg, watch, 1, NULL, NULL, NULL, 0, &result, NULL);
+    static int said; if (!ok && said++ < 3) MP_GAME_LOG("%s for %s not requested (result %u)", name, p->name, result);
+    return ok;
+}
+static void dir_matrix(float *m, const float *p, const float *d);
+// An adult's arrow on the string while it draws (BowCharge): OnlineArrow (tools/make_online_mod.py: the display arrow of the shots in
+// flight without its pouch AI and physics; Pouch_Arrow_Normal itself, kept for the whole session, never showed, runs/nock1-3), its tail
+// at the drawing hand (ArrowHoldBoneName Weapon_L), along the line to the bow hand (runs/nock4). Gone at BowShoot: the shot's own arrow
+// flies from there (mp_game_shot_fx)
+#define NOCK_BONE "Weapon_L"
+static void nock_tick(Puppet *p, int drawing) {
+    if (p->child) return;   // (young Link's slingshot seed: too small to show)
+    if (!p->nock && !p->nock_watch) { display_make(p, "OnlineArrow", p->nock_arg, &p->nock_watch); return; }
+    if (!p->nock) { if ((p->nock = watch_take(&p->nock_watch))) MP_GAME_LOG("arrow on the string for %s taken", p->name); return; }
+    uint32_t st = r32(p->nock + A_STATE); if (st == 3) return;
+    if (st != 4) { p->nock = 0; return; }
+    float m[12], hl[12], hr[12];
+    if (drawing && bone_world(p->actor, NOCK_BONE, hl) && bone_world(p->actor, BOW_BONE, hr)) {
+        float d[3] = { hr[3] - hl[3], hr[7] - hl[7], hr[11] - hl[11] }, l = sqrtf(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+        if (l < 0.05f) return;
+        static env_switch e = { .name = "DM_MP_NOCK_BACK" }; const char *v = env_now(&e); float back = v[0] ? (float)atof(v) : 0.0f;   // (tests: m behind the hand)
+        d[0] /= l; d[1] /= l; d[2] /= l; float at[3] = { hl[3] - d[0] * back, hl[7] - d[1] * back, hl[11] - d[2] * back };
+        dir_matrix(m, at, d);
+    } else { float at[3]; rd(p->actor + A_POS, at, sizeof at); yaw_matrix(m, at[0], at[1] - 20, at[2], 0); }
+    ((f_force_set_matrix)fn(F_FORCE_SET_MATRIX))((void *)p->nock, m, false);
 }
 static void bow_tick(Puppet *p, int aiming, int anim) {
     static env_switch sw = { .name = "DM_MP_BOW" }; if (!strcmp(env_now(&sw), "0")) return;
-    if (!p->bow && !p->bow_watch) {
-        // (made with its stand-in, kept out of sight: made at its first draw, it showed up a few frames late, runs/vid29)
-        memset(p->bow_arg, 0, sizeof p->bow_arg);
-        float at[3]; rd(p->actor + A_POS, at, sizeof at); at[1] -= 20;
-        float rot[9] = { 1, 0, 0, 0, 1, 0, 0, 0, 1 }, sc[3] = { 1, 1, 1 };
-        memcpy(p->bow_arg + 0x00, at, 12); memcpy(p->bow_arg + 0x0c, rot, 36); memcpy(p->bow_arg + 0x30, sc, 12);
-        static const char *empty = ""; memcpy(p->bow_arg + 0x40, &empty, 8);
-        p->bow_arg[0x4a] = 1; *(uint32_t *)(p->bow_arg + 0x98) = 1 | 2 | 4;
-        static const char *adult = "OnlineBow", *child = "OnlineSling"; uint32_t result = 0;
-        bool ok = ((f_create)fn(F_CREATE_ACTOR))((void *)rp((uint64_t)M + G_ACTOR_MGR), p->child ? &child : &adult, p->bow_arg, &p->bow_watch, 1, NULL, NULL, NULL, 0, &result, NULL);
-        static int said; if (!ok && said++ < 3) MP_GAME_LOG("bow for %s not requested (result %u)", p->name, result);
-        return;
+    nock_tick(p, aiming && anim == 6);
+    if (!p->bow && !p->bow_watch) {   // (made with its stand-in, kept out of sight: made at its first draw, it showed up a few frames late, runs/vid29)
+        display_make(p, p->child ? "OnlineSling" : "OnlineBow", p->bow_arg, &p->bow_watch); return;
     }
     if (!p->bow) { if ((p->bow = watch_take(&p->bow_watch))) MP_GAME_LOG("bow for %s taken", p->name); return; }
     uint32_t st = r32(p->bow + A_STATE); if (st == 3) return;
@@ -1112,7 +1140,7 @@ static void down_spot(const Puppet *p, float *out) {   // where a downed one is 
 }
 static void puppets_update(uint64_t me, const mp_remote *o, int n, uint32_t scene) {
     if (scene != g_pup_scene) {   // a new area: the game deleted the stand-ins; requests still pending are cancelled (they would leak the engine's watchers)
-        for (int i = 0; i < MAX_PUPPETS; i++) { watch_cancel(&g_pup[i].watch); watch_cancel(&g_pup[i].navi_watch); watch_cancel(&g_pup[i].bow_watch); }
+        for (int i = 0; i < MAX_PUPPETS; i++) { watch_cancel(&g_pup[i].watch); watch_cancel(&g_pup[i].navi_watch); watch_cancel(&g_pup[i].bow_watch); watch_cancel(&g_pup[i].nock_watch); }
         memset(g_pup, 0, sizeof g_pup); g_pup_scene = scene;
     }
     if (n > MAX_PUPPETS) n = MAX_PUPPETS;

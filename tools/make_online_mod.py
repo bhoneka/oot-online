@@ -127,10 +127,11 @@ def main():
     # code asks who made it, Equipment_IsCreatedByPouch, runs/vid28)
     base_name = 'Pouch_Arrow_Normal'
     base_row = {id(rows): next(r for r in rows if r.get('__RowId') == base_name) for rows in (actor_rows, game_rows)}
-    for mine, stock in (('OnlineBow', 'Weapon_Range_Bow'), ('OnlineSling', 'Weapon_Range_SlingShot')):
+    # OnlineArrow: the display arrow itself without them (the one on an archer's string while it draws, kept for the whole session)
+    for mine, stock in (('OnlineBow', 'Weapon_Range_Bow'), ('OnlineSling', 'Weapon_Range_SlingShot'), ('OnlineArrow', base_name)):
         pack = read_sarc(romfs_read.read(img, f'Pack/Actor/{base_name}.pack.zs'))
-        wpn = read_sarc(romfs_read.read(img, f'Pack/Actor/{stock}.pack.zs'))
-        wcomps = read_byml(wpn[f'Actor/{stock}.engine__actor__ActorParam.bgyml'])['Components']
+        wpn = read_sarc(romfs_read.read(img, f'Pack/Actor/{stock}.pack.zs')) if stock != base_name else {}
+        wcomps = read_byml(wpn[f'Actor/{stock}.engine__actor__ActorParam.bgyml'])['Components'] if wpn else {}
         ap = read_byml(pack.pop(f'Actor/{base_name}.engine__actor__ActorParam.bgyml')); comps = ap.setdefault('Components', {})
         for key in ('ModelInfoRef', 'AnimationRef', 'ASRef', 'ASInfoRef', 'ActorNameRef'):
             ref = wcomps.get(key)
@@ -140,18 +141,18 @@ def main():
         for key in ('AIInfoRef', 'PhysicsRef', 'PouchContentRef'): comps[key] = ''
         pack[f'Actor/{mine}.engine__actor__ActorParam.bgyml'] = write_byml(ap)
         put(f'Pack/Actor/{mine}.pack.zs', write_sarc(pack), 'pack.zsdic')
-        print(f'Pack/Actor/{mine}.pack.zs: {base_name} showing {stock} (model, animation, sequence), no AI, physics or pouch content ({len(pack)} files)')
+        print(f'Pack/Actor/{mine}.pack.zs: {base_name}' + (f' showing {stock} (model, animation, sequence)' if wpn else '') + f', no AI, physics or pouch content ({len(pack)} files)')
         for rows in (actor_rows, game_rows):
             rows[:] = [r for r in rows if r.get('__RowId') != mine]
             row = copy.deepcopy(base_row[id(rows)]); row['__RowId'] = mine; row.pop('ActorName', None)
-            wrow = next(r for r in rows if r.get('__RowId') == stock)
+            wrow = next(r for r in rows if r.get('__RowId') == stock)   # (OnlineArrow: the display arrow's own row)
             if 'InstanceHeapSize' in row or 'InstanceHeapSize' in wrow:
                 row['InstanceHeapSize'] = max(row.get('InstanceHeapSize', 0), wrow.get('InstanceHeapSize', 0))
             keys = [r['__RowId'] for r in rows]; assert keys == sorted(keys), 'table not sorted by name'
             rows.insert(bisect.bisect_left(keys, mine), row)
     for rel, rows in ((ACTOR_INFO, actor_rows), (GAME_ACTOR_INFO, game_rows)):
         data = write_byml(rows); assert read_byml(data) == rows
-        put(rel, data, 'zs.zsdic'); print(f'{rel}: OnlinePlayer_Adult, _Child, OnlineNavi, OnlineBow and OnlineSling rows ({len(rows)} rows)')
+        put(rel, data, 'zs.zsdic'); print(f'{rel}: OnlinePlayer_Adult, _Child, OnlineNavi, OnlineBow, OnlineSling and OnlineArrow rows ({len(rows)} rows)')
 
     # ---- the resource size table (RESTBL v1: "RESTBL", u32 version 1, u32 name length 160, u32 crc count, u32 name count;
     # sorted (crc32(path), size) pairs; then (char[160] path, u32 size) for colliding paths). The path is the RomFS path without .zs
@@ -174,7 +175,8 @@ def main():
         key = rel[:-3] if rel.endswith('.zs') else rel
         if key.startswith('Pack/Actor/') and key.endswith('.pack'):
             stock_rel = (rel.replace('OnlinePlayer_', 'PouchPlayer_').replace('OnlineNavi', 'Dm_Npc_Navi')
-                         .replace('OnlineBow', 'Pouch_Arrow_Normal').replace('OnlineSling', 'Pouch_Arrow_Normal'))
+                         .replace('OnlineBow', 'Pouch_Arrow_Normal').replace('OnlineSling', 'Pouch_Arrow_Normal')
+                         .replace('OnlineArrow', 'Pouch_Arrow_Normal'))
             stock = read_sarc(romfs_read.read(img, stock_rel))
             for inner, body in read_sarc(data).items():
                 if stock.get(inner) != body: need_entry(inner, 5000 + 3 * len(body) + MARGIN)
