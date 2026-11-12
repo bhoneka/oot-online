@@ -120,7 +120,11 @@ It asks for the player's `.nup` and builds `~/Applications/Ocarina of Time Onlin
 - **On the player's Mac** (`setup/install.py`, run by the app with the standalone Python 3.14 it carries): nxnative is downloaded
   at `patches/NXNATIVE_COMMIT` from GitHub (the commit's archive, no git), the four patches applied with `/usr/bin/patch`,
   `integrate_nxnative.py` run, and the chain version checked against the prebuilt host's; then nxnative's build (`--no-xcode`),
-  the fonts, the stand-ins and the pipeline prebuild. Every tool it starts gets `PATH=/usr/bin:/bin:/usr/sbin:/sbin` and
+  the fonts, the stand-ins and the pipeline prebuild. It reads the game file first: in Downloads, Documents, Desktop, iCloud
+  Drive or on another disk, macOS asks once whether Install OoT Online may access that folder, and the read waits for the answer
+  (a refusal stops the build with where to turn it on: System Settings → Privacy & Security → Files & Folders). The server is the
+  window's (Options), else the website's `server.txt` read at install time, else the `server.txt` the installer was built with
+  (`docs/server.txt`, for when the website cannot be reached). Every tool it starts gets `PATH=/usr/bin:/bin:/usr/sbin:/sbin` and
   `DEVELOPER_DIR=/var/empty/no-xcode`, so anything that reached for Xcode fails with an error instead of offering to install the
   Command Line Tools. The shader translator still runs as Intel code on macOS 26 (`nxnative-mac26-translator.patch`): the
   installer asks macOS to install Rosetta when it is missing. The app copies its payload out of itself first

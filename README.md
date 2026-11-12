@@ -23,7 +23,8 @@ Nothing else: no Xcode, no Homebrew, no Terminal.
 2. The first time, macOS says it cannot check the app for malicious software: it is a free fan project, not signed by Apple.
    Click **Done**, then open **System Settings → Privacy & Security**, scroll down, click **Open Anyway** next to "Install OoT
    Online" and confirm. This happens once.
-3. Click **Choose your game file…**, pick your `.nup`, then **Build Ocarina of Time Online**.
+3. Click **Choose your game file…**, pick your `.nup`, then **Build Ocarina of Time Online**. If macOS asks whether it may
+   access the folder your game file is in (your Downloads, say), click **Allow**.
 
 It builds **Ocarina of Time Online** into the Applications folder in your home folder. The first build takes one to three
 hours (it translates and compiles about 43,000 of the game's shaders for your Mac) and is done once; opening the installer

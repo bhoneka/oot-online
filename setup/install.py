@@ -69,6 +69,15 @@ def check_mac(nup, work):
         raise Stop('OoT Online needs a Mac with an Apple chip (M1 or later).')
     if macos() < (26, 6): raise Stop(f'OoT Online needs macOS 26.6 or later; this Mac has {platform.mac_ver()[0]}.')
     if not nup.is_file(): raise Stop(f'Cannot find the game file: {nup}')
+    # read now: in Downloads, Documents, Desktop, iCloud Drive or on another disk, macOS asks once whether the installer may read there (the build waits for the answer)
+    guarded = [HOME / d for d in ('Downloads', 'Documents', 'Desktop', 'Library/Mobile Documents')] + [Path('/Volumes')]
+    if any(nup.is_relative_to(g) for g in guarded):
+        say('If macOS asks whether Install OoT Online may access the folder your game file is in, click Allow.')
+    try:
+        with open(nup, 'rb') as f: f.read(16)
+    except PermissionError:
+        raise Stop(f'macOS did not let the installer read your game file ({nup}). Open System Settings → Privacy & Security → Files & Folders, turn on '
+                   'the folder your game file is in for Install OoT Online, and build again; or move the game file to another folder and choose it again.')
     work.mkdir(parents=True, exist_ok=True)
     free = shutil.disk_usage(work).free / 2**30
     say(f'{free:.0f} GB free on the disk')
@@ -188,10 +197,15 @@ def prebuild_pipelines(app, data, logs):
 
 
 def server_address(given):
+    """The server the game joins: the window's (--server), else OOT_ONLINE_SERVER, else the public one: the website's server.txt, read now (so the
+    server can move without a new installer), or, when the website cannot be reached, the address this installer was built with (server.txt)"""
     if given: return given
     if os.environ.get('OOT_ONLINE_SERVER'): return os.environ['OOT_ONLINE_SERVER']
     r = subprocess.run(['curl', '-fsSL', '--max-time', '20', f'{SITE}/server.txt'], capture_output=True, text=True, env=tool_env())
-    return (r.stdout.split() or [''])[0] if r.returncode == 0 else ''
+    live = (r.stdout.split() or [''])[0] if r.returncode == 0 else ''
+    if re.fullmatch(r'[A-Za-z0-9.\-\[\]:]+:\d+', live): return live
+    built = OOT / 'server.txt'
+    return ((built.read_text().split() or [''])[0] if built.is_file() else '')
 
 
 def main():
@@ -215,7 +229,7 @@ def main():
         m = manifest()
         phase(2); tree, commit = get_nxnative(support / 'source', logs, m['chain'])
         server = server_address(a.server)
-        say(f'server: {server}' if server else 'no public server is up yet: the game is built anyway; run the installer again once there is one')
+        say(f'server: {server}' if server else 'no server address (the website could not be reached): the game is built without one; open the installer again later to add it')
         env_file = support / 'online_env.txt'   # OoT Online's switches go into the app's own env file (Contents/Resources/dm/env.txt): the save is never written online (hle_mp.c)
         env_file.write_text(f'DM_ROMFS_OVERLAY={data}/oot_online/romfs\nDM_MP_STANDIN=OnlinePlayer\nDM_MP_LIVE=1\n' + (f'DM_MP_SERVER={server}\n' if server else ''))
         phase(3); app.parent.mkdir(parents=True, exist_ok=True); build_game(tree, nup, app, work, env_file, logs, commit)

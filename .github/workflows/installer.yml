@@ -58,6 +58,7 @@ jobs:
         run: |
           mkdir -p payload/oot-online payload/licenses/nxnative
           cp -R patches tools client setup payload/oot-online/
+          cp docs/server.txt payload/oot-online/server.txt   # the public server, for when the website cannot be reached at install time
           cp nx/LICENSE payload/licenses/nxnative/LICENSE
           for d in nx/dm/third_party/*/; do n=$(basename "$d"); for f in "$d"LICENSE* "$d"COPYING*; do [ -f "$f" ] && mkdir -p "payload/licenses/nxnative/$n" && cp "$f" "payload/licenses/nxnative/$n/"; done; done
           cat > payload/licenses/README.txt <<'EOF'
