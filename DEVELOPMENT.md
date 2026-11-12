@@ -102,7 +102,14 @@ It asks for the player's `.nup` and builds `~/Applications/Ocarina of Time Onlin
   32023.921); the functions, their types and vertex inputs are the same as Metal reports them; the 41 compute shaders' pipelines are
   the same (threads per group, threadgroup memory, execution width); compiling twice gives the same bytes; `dmsh_side.cut` splits
   them and Metal loads the pieces. The three shaders the offline flags exist for (mesh 35785cddc971290c, `-fwrapv`; compute
-  1f78730053feb036 and e172bd7ec218ab8e, the bracket depth) compile with them.
+  1f78730053feb036 and e172bd7ec218ab8e, the bracket depth) compile with them. Speed (M5 Max, other jobs running): the 432
+  compiled in 13 s with 18 compiles at once, 19 s with 8 (the Mac compiles inside its own compiler service, several at a time),
+  so the compile part of a first build is about half an hour there; the translation (on macOS 26 under Rosetta) comes on top.
+- **A whole first build without Xcode** (2026-11-11: `setup/install.py` in a clean environment, `PATH` of macOS's own tools,
+  Xcode unreachable; M5 Max at background priority beside other jobs): 2.6 hours (unpack 2 min, rewrite 3, split 5, shaders 143,
+  app 3). All 42,848 shaders and all 44,769 side libraries (`_bx` 22,296, `_bp` 10,951, `_bf` 9,839, `_bv` 1,683) built, none
+  failed, nothing lost; all 87,617 libraries have the same functions, function types and vertex inputs as the Xcode 27.1 build's,
+  `c1_full.tsv` and `cb_extent.tsv` are the same but for their header, and the library is 5.25 GB (Xcode's: 5.26).
 - **Prebuilt parts.** `dm/mac/prebuild.py` (in the patch) builds the host for the profile with OoT Online's module, the app's
   launcher and `dmsh_rtc`, and writes `manifest.json` (chain version, the profile's `game_profile.h`, minimum macOS, hashes).
   `--no-xcode --prebuilt <dir>` packs them: it checks the host was built for this profile and chain version (a derived profile, the
@@ -119,9 +126,11 @@ It asks for the player's `.nup` and builds `~/Applications/Ocarina of Time Onlin
   installer asks macOS to install Rosetta when it is missing. The app copies its payload out of itself first
   (`~/Library/Application Support/OoT Online/installer/<payload id>`, `ditto --noqtn`), so nothing runs from the downloaded,
   quarantined bundle.
-- **Nothing from the game is in the installer:** Python and its packages, the prebuilt binaries (compiled from nxnative and
-  `client/`), OoT Online's scripts and the licenses (`payload/licenses`; zbic is GPLv2, its source rides along). nxnative's own
-  game tables come from nxnative's GitHub on the player's Mac.
+- **Nothing from the game is in the installer:** Python and its packages (lz4, capstone 5, fonttools, zstandard, zbic), the
+  prebuilt binaries (compiled from nxnative and `client/`), OoT Online's scripts and the licenses (`payload/licenses`; zbic is
+  GPLv2, its source rides along). nxnative's own game tables come from nxnative's GitHub on the player's Mac. The setup tools
+  (`game_fonts.py`, `make_online_mod.py`) read the game's image with nxnative's RomFS reader from `NXNATIVE_DIR` (the installer's
+  and `ootonline-setup.sh`'s checkout; `~/nxnative` when it is not set): a player's Mac has no `~/nxnative`.
 - **A release:** Actions → installer → Run workflow with a version (e.g. `1.0.0`): it builds on GitHub's `xcode-27` runner
   (Xcode 27.1, the one the tested host was built with) and publishes `installer-v1.0.0` with `Install-OoT-Online.zip`. Pushes to
   the `installer` branch build it without releasing (an artifact).
