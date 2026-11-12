@@ -98,4 +98,4 @@ jobs:
         run: |
           gh release create "installer-v$VERSION" dist/Install-OoT-Online.zip --target "$GITHUB_SHA" --latest \
             --title "OoT Online installer $VERSION" \
-            --notes "Download **Install-OoT-Online.zip**, open it, and open **Install OoT Online**. The first time, macOS says it cannot check the app: open **System Settings → Privacy & Security** and click **Open Anyway**. Then choose your own game file (a .nup). No Xcode, Homebrew or Terminal needed. Built from $(git rev-parse --short HEAD) with nxnative $(cut -c1-12 patches/NXNATIVE_COMMIT)."
+            --notes "Download **Install-OoT-Online.zip**, open it, and open **Install OoT Online**. The first time, macOS says it cannot check the app: open **System Settings → Privacy & Security** and click **Open Anyway**. Then choose your own game file (a .nup); if macOS asks whether it may access the folder the file is in, click **Allow**. No Xcode, Homebrew or Terminal needed. Built from $(git rev-parse --short HEAD) with nxnative $(cut -c1-12 patches/NXNATIVE_COMMIT)."
